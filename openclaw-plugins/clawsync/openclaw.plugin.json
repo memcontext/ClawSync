@@ -3,6 +3,7 @@
   "name": "ClawSync Meeting Negotiator",
   "version": "1.0.0",
   "description": "智能会议协商代理插件 - 作为用户的贴身助理，负责收集情报、保护隐私并代表用户进行初步博弈",
+  "skills": ["./skills"],
   "configSchema": {
     "type": "object",
     "properties": {
@@ -22,5 +23,10 @@
         "default": true
       }
     }
+  },
+  "uiHints": {
+    "serverUrl": { "label": "服务端地址", "placeholder": "http://192.168.22.28:8000" },
+    "pollingIntervalMs": { "label": "轮询间隔 (ms)", "placeholder": "10000" },
+    "autoRespond": { "label": "自动响应会议邀请" }
   }
 }

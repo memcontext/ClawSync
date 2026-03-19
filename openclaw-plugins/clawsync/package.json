@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "description": "ClawSync - AI meeting negotiation agent plugin for OpenClaw",
   "main": "index.ts",
-  "openclaw.extensions": {
-    "clawsync": "index.ts"
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "dependencies": {},
   "devDependencies": {},

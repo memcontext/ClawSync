@@ -279,36 +279,39 @@ export default function register(api: any) {
   );
 
   // ============================================================
-  // 10. 注册 Agent System Prompt 注入
+  // 10. 注册 Agent System Prompt 注入（使用官方 before_prompt_build API）
   //     让 Agent 了解 ClawSync 插件的能力，并在用户未绑定时主动引导
   // ============================================================
-  api.registerHook?.("before_agent_start", (ctx: any) => {
-    const creds = loadCredentials();
-    const isBound = !!creds?.token;
+  api.on?.(
+    "before_prompt_build",
+    () => {
+      const creds = loadCredentials();
+      const isBound = !!creds?.token;
 
-    const systemPromptAddon = isBound
-      ? [
-          "[ClawSync 会议助手已就绪]",
-          `当前绑定邮箱: ${creds!.email}，后台轮询运行中。`,
-          '用户可以直接说「帮我约某某开会」来发起会议协商，',
-          '或说「有没有新的会议邀请」来手动检查待办任务。',
-          '会议在对话中用标题称呼（如「项目讨论会」），不需要让用户记 ID。',
-        ].join("\n")
-      : [
-          "[ClawSync 会议助手 - 需要初始化]",
-          "用户尚未绑定身份。请友好地引导用户提供邮箱来完成绑定。",
-          '你可以说：「我是你的会议助手 ClawSync，可以帮你自动约会议、处理邀请。',
-          '要开始使用，请先告诉我你的邮箱地址，我来帮你注册。」',
-          "",
-          "绑定成功后用户可以：",
-          '- 一句话发起会议（如「帮我约 Bob 明天开会」）',
-          "- 自动处理收到的会议邀请（后台静默完成）",
-          "- 收到妥协建议时在这里做决定",
-        ].join("\n");
+      const systemPromptAddon = isBound
+        ? [
+            "[ClawSync 会议助手已就绪]",
+            `当前绑定邮箱: ${creds!.email}，后台轮询运行中。`,
+            '用户可以直接说「帮我约某某开会」来发起会议协商，',
+            '或说「有没有新的会议邀请」来手动检查待办任务。',
+            '会议在对话中用标题称呼（如「项目讨论会」），不需要让用户记 ID。',
+          ].join("\n")
+        : [
+            "[ClawSync 会议助手 - 需要初始化]",
+            "用户尚未绑定身份。当用户首次与你对话时，请友好地引导用户提供邮箱来完成绑定。",
+            '你可以说：「我注意到你还没有激活会议助手 ClawSync。它可以帮你一句话约会议、自动处理邀请。',
+            '要开始使用，请告诉我你的邮箱地址，我来帮你注册。」',
+            "",
+            "绑定成功后用户可以：",
+            '- 一句话发起会议（如「帮我约 Bob 明天开会」）',
+            "- 自动处理收到的会议邀请（后台静默完成）",
+            "- 收到妥协建议时在这里做决定",
+          ].join("\n");
 
-    // 注入到 Agent 的 system prompt 中
-    ctx?.addSystemPrompt?.(systemPromptAddon);
-  });
+      return { appendSystemContext: systemPromptAddon };
+    },
+    { priority: 5 },
+  );
 
   console.log("[ClawSync] ClawSync Meeting Negotiator 插件已加载。");
 }
