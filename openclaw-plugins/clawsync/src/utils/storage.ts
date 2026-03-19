@@ -8,15 +8,24 @@ import { join } from "path";
 import { homedir } from "os";
 import type { StoredCredentials, UserPreferences, SessionContext } from "../types/index.js";
 
-const CLAWSYNC_DIR = join(homedir(), ".openclaw", "clawsync");
-const CREDENTIALS_FILE = join(CLAWSYNC_DIR, "credentials.json");
-const PREFERENCES_FILE = join(CLAWSYNC_DIR, "preferences.json");
-const SESSION_FILE = join(CLAWSYNC_DIR, "session.json");
+// 存储路径（由 initStorage 初始化，基于插件 ID 动态生成）
+let STORAGE_DIR = join(homedir(), ".openclaw", "clawsync");
+let CREDENTIALS_FILE = join(STORAGE_DIR, "credentials.json");
+let PREFERENCES_FILE = join(STORAGE_DIR, "preferences.json");
+let SESSION_FILE = join(STORAGE_DIR, "session.json");
+
+/** 初始化存储路径（插件加载时调用，传入插件 ID） */
+export function initStorage(pluginId: string) {
+  STORAGE_DIR = join(homedir(), ".openclaw", pluginId);
+  CREDENTIALS_FILE = join(STORAGE_DIR, "credentials.json");
+  PREFERENCES_FILE = join(STORAGE_DIR, "preferences.json");
+  SESSION_FILE = join(STORAGE_DIR, "session.json");
+}
 
 /** 确保存储目录存在 */
 function ensureDir() {
-  if (!existsSync(CLAWSYNC_DIR)) {
-    mkdirSync(CLAWSYNC_DIR, { recursive: true });
+  if (!existsSync(STORAGE_DIR)) {
+    mkdirSync(STORAGE_DIR, { recursive: true });
   }
 }
 

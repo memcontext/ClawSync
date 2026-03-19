@@ -8,8 +8,12 @@
 //   向同一个 session 推送通知，确保消息不会跑到别的对话窗口。
 // ============================================================
 
+import { readFileSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { ClawSyncApiClient } from "./src/utils/api-client.js";
 import {
+  initStorage,
   loadCredentials,
   saveSession,
   loadSession,
@@ -40,18 +44,30 @@ const DEFAULT_CONFIG: ClawSyncPluginConfig = {
   autoRespond: true,
 };
 
+// ---- 从 manifest 读取插件 ID（动态化，改 ID 不需要改代码） ----
+function readPluginId(): string {
+  try {
+    const manifestPath = join(__dirname, "openclaw.plugin.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    return manifest.id ?? "clawsync";
+  } catch {
+    return "clawsync";
+  }
+}
+
 export default function register(api: any) {
   // ============================================================
-  // 1. 读取插件配置
+  // 1. 读取插件配置（通过 manifest id 动态定位）
   // ============================================================
+  const PLUGIN_ID = readPluginId();
   const pluginConfig: ClawSyncPluginConfig = {
     ...DEFAULT_CONFIG,
-    ...(api.config ?? {}),
+    ...(api.config?.plugins?.entries?.[PLUGIN_ID]?.config ?? {}),
   };
+  console.log(`[${PLUGIN_ID}] 插件配置: serverUrl=${pluginConfig.serverUrl}`);
 
-  // ============================================================
-  // 2. 初始化 API Client
-  // ============================================================
+  // 初始化存储目录（基于插件 ID）
+  initStorage(PLUGIN_ID);
   const apiClient = new ClawSyncApiClient(pluginConfig.serverUrl);
 
   // 尝试从本地恢复已保存的 Token
@@ -192,14 +208,15 @@ export default function register(api: any) {
   // ============================================================
   api.registerTool({
     ...bindIdentitySchema,
-    handler: (params: any, ctx: any) => {
+    async execute(_id: string, params: any, ctx: any) {
       // 捕获当前 session（绑定时的对话就是主 session）
       captureSession(ctx);
 
       const handler = createBindIdentityHandler(apiClient, () => {
         pollingManager.start();
       });
-      return handler(params);
+      const result = await handler(params);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
 
@@ -209,19 +226,24 @@ export default function register(api: any) {
   // ============================================================
   api.registerTool({
     ...initiateMeetingSchema,
-    handler: (params: any, ctx: any) => {
+    async execute(_id: string, params: any, ctx: any) {
       captureSession(ctx);
       const handler = createInitiateMeetingHandler(apiClient);
-      return handler(params);
+      const result = await handler(params);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
 
   // ============================================================
   // 8. 注册 Tool 3: check_and_respond_tasks (轮询+响应)
   // ============================================================
+  const checkHandler = createCheckAndRespondTasksHandler(apiClient);
   api.registerTool({
     ...checkAndRespondTasksSchema,
-    handler: createCheckAndRespondTasksHandler(apiClient),
+    async execute(_id: string, params: any) {
+      const result = await checkHandler(params);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
   });
 
   // ============================================================
