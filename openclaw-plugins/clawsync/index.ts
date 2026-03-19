@@ -1,16 +1,16 @@
 // ============================================================
 // ClawSync Plugin - 入口文件
-// OpenClaw 插件注册点：注册 3 个核心 Tools + 轮询管理器
+// OpenClaw 插件注册点：注册 3 个核心 Tools + 轮询服务
 //
-// Session 策略：
-//   用户绑定身份时捕获当前 session 信息并持久化。
-//   后续轮询发现需要用户决策的任务时，通过 api.sendMessage
-//   向同一个 session 推送通知，确保消息不会跑到别的对话窗口。
+// 架构设计：
+//   1. 插件加载时：恢复 Token → 有 Token 则立即启动轮询
+//   2. registerService：管理轮询生命周期（start/stop）
+//   3. before_prompt_build：捕获 session + 注入 system prompt + 推送待办通知
+//   4. 所有 API 均严格对齐 OpenClaw 插件文档 + API_REFERENCE.md
 // ============================================================
 
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { ClawSyncApiClient } from "./src/utils/api-client.js";
 import {
   initStorage,
@@ -44,7 +44,7 @@ const DEFAULT_CONFIG: ClawSyncPluginConfig = {
   autoRespond: true,
 };
 
-// ---- 从 manifest 读取插件 ID（动态化，改 ID 不需要改代码） ----
+// ---- 从 manifest 读取插件 ID ----
 function readPluginId(): string {
   try {
     const manifestPath = join(__dirname, "openclaw.plugin.json");
@@ -56,75 +56,49 @@ function readPluginId(): string {
 }
 
 export default function register(api: any) {
-  // ============================================================
-  // 1. 读取插件配置（通过 manifest id 动态定位）
-  // ============================================================
   const PLUGIN_ID = readPluginId();
+
+  // ============================================================
+  // 1. 读取插件配置
+  // ============================================================
   const pluginConfig: ClawSyncPluginConfig = {
     ...DEFAULT_CONFIG,
     ...(api.config?.plugins?.entries?.[PLUGIN_ID]?.config ?? {}),
   };
   console.log(`[${PLUGIN_ID}] 插件配置: serverUrl=${pluginConfig.serverUrl}`);
 
-  // 初始化存储目录（基于插件 ID）
+  // 初始化存储目录
   initStorage(PLUGIN_ID);
+
+  // ============================================================
+  // 2. 初始化 API Client + 恢复 Token
+  // ============================================================
   const apiClient = new ClawSyncApiClient(pluginConfig.serverUrl);
 
-  // 尝试从本地恢复已保存的 Token
   const savedCreds = loadCredentials();
   if (savedCreds?.token) {
     apiClient.setToken(savedCreds.token);
-    console.log(
-      `[ClawSync] 已从本地恢复身份凭证: ${savedCreds.email} (user_id: ${savedCreds.user_id})`,
-    );
+    console.log(`[ClawSync] 已恢复身份凭证: ${savedCreds.email} (user_id: ${savedCreds.user_id})`);
   }
 
   // ============================================================
   // 3. Session 管理
-  //    从本地恢复上次绑定时记录的 session 上下文
-  //    如果还没有，等 bind_identity 调用时捕获
+  //    - 从本地恢复，如无则使用默认值 "agent:main:main"
+  //    - before_prompt_build 中动态更新
   // ============================================================
-  let sessionCtx: SessionContext | null = loadSession();
-  if (sessionCtx?.sessionKey) {
-    console.log(`[ClawSync] 已恢复 session: ${sessionCtx.sessionKey}`);
-  }
-
-  // Session 捕获已移至 before_prompt_build 钩子中
-  // 每次用户发消息时自动从事件上下文中提取 session 信息
-
-  /**
-   * 向用户 session 推送一条消息，唤醒 Agent 处理
-   * 利用 OpenClaw 的 api.sendMessage 注入消息到指定 session
-   */
-  function pushMessageToUser(text: string): void {
-    if (!sessionCtx?.sessionKey) {
-      console.warn(
-        "[ClawSync] 无法推送消息：尚未捕获用户 session。请先完成身份绑定。",
-      );
-      return;
-    }
-
-    try {
-      // OpenClaw api.sendMessage 向指定 session 注入一条消息
-      // Agent 会被唤醒来处理这条消息并回复用户
-      api.sendMessage?.({
-        sessionKey: sessionCtx.sessionKey,
-        channel: sessionCtx.channel,
-        peerId: sessionCtx.peerId,
-        text,
-      });
-      console.log(
-        `[ClawSync] 已推送消息到 session ${sessionCtx.sessionKey}`,
-      );
-    } catch (err) {
-      console.error("[ClawSync] 推送消息失败:", err);
-    }
+  let sessionCtx: SessionContext = loadSession() ?? { sessionKey: "agent:main:main" };
+  if (sessionCtx.sessionKey) {
+    console.log(`[ClawSync] session: ${sessionCtx.sessionKey}`);
   }
 
   // ============================================================
-  // 4. 初始化轮询管理器
-  //    不在这里启动，统一由 after_agent_start 钩子启动
-  //    确保 Gateway 完全就绪后再开始发请求
+  // 4. 待推送通知队列
+  //    轮询发现任务 → 存入队列 → before_prompt_build 时注入给 Agent
+  // ============================================================
+  let pendingNotifications: string[] = [];
+
+  // ============================================================
+  // 5. 轮询管理器
   // ============================================================
   const taskHandler = createCheckAndRespondTasksHandler(apiClient);
   const pollingManager = new PollingManager({
@@ -133,13 +107,10 @@ export default function register(api: any) {
     onPoll: async () => {
       const result = await taskHandler({});
       if ((result as any).pending_count > 0) {
-        console.log(
-          `[ClawSync] 轮询发现 ${(result as any).pending_count} 个待办任务`,
-        );
+        console.log(`[ClawSync] 轮询发现 ${(result as any).pending_count} 个待办任务`);
       }
       return result;
     },
-    // 轮询发现任务时，向用户 session 推送通知，唤醒 Agent 处理
     onNeedAgentAction: (tasks: unknown[]) => {
       for (const task of tasks) {
         const t = task as any;
@@ -147,16 +118,12 @@ export default function register(api: any) {
         const taskType = t.task_type;
 
         if (taskType === "INITIAL_SUBMIT") {
-          // Agent 需要读取日历并提交空闲时间
-          pushMessageToUser(
-            `[会议邀请] 「${title}」${t.server_message ?? "你收到了一个会议邀请，请提交空闲时间。"}\n\n` +
-            `请帮我查看日历，选择合适的时间段提交。`,
+          pendingNotifications.push(
+            `[会议邀请] 「${title}」— ${t.server_message ?? "你收到了一个会议邀请，请提交空闲时间。"}`
           );
         } else if (taskType === "COUNTER_PROPOSAL") {
-          // Agent 需要展示协调方建议并等用户决策
-          pushMessageToUser(
-            `[协商通知] 「${title}」${t.coordinator_message ?? "协调方发来了新的协商建议。"}\n\n` +
-            `请告诉我你的决定。`,
+          pendingNotifications.push(
+            `[协商通知] 「${title}」— ${t.coordinator_message ?? "协调方发来了新的协商建议。"}`
           );
         }
       }
@@ -164,22 +131,39 @@ export default function register(api: any) {
   });
 
   // ============================================================
-  // 5. 生命周期钩子: Gateway 启动 → 启动轮询
-  //    轮询的完整生命周期与 Gateway 绑定:
-  //    after_agent_start  → 有 Token 就开始轮询
-  //    before_agent_stop  → 清理定时器
-  //
-  //    如果此时还没绑定（没有 Token），轮询不会启动，
-  //    等用户调 bind_identity 成功后再通过回调启动。
+  // 6. 插件加载时：有 Token 立即启动轮询（不等钩子）
+  // ============================================================
+  if (apiClient.getToken()) {
+    console.log("[ClawSync] 有已保存的 Token，立即启动轮询。");
+    pollingManager.start();
+  }
+
+  // ============================================================
+  // 7. registerService：管理轮询生命周期（文档化 API）
+  // ============================================================
+  api.registerService?.({
+    id: "clawsync-polling",
+    start: () => {
+      if (apiClient.getToken() && !pollingManager.isRunning()) {
+        console.log("[ClawSync] Service start: 启动轮询。");
+        pollingManager.start();
+      }
+    },
+    stop: () => {
+      console.log("[ClawSync] Service stop: 停止轮询。");
+      pollingManager.stop();
+    },
+  });
+
+  // ============================================================
+  // 8. 生命周期钩子（补充触发，兼容正常冷启动顺序）
   // ============================================================
   api.registerHook?.(
     "after_agent_start",
     () => {
-      if (apiClient.getToken()) {
-        console.log("[ClawSync] Gateway 已就绪，启动后台轮询。");
+      if (apiClient.getToken() && !pollingManager.isRunning()) {
+        console.log("[ClawSync] after_agent_start: 启动轮询。");
         pollingManager.start();
-      } else {
-        console.log("[ClawSync] Gateway 已就绪，但尚未绑定身份，轮询待命中。");
       }
     },
     { name: "clawsync.after-agent-start", description: "Gateway 就绪后启动轮询" },
@@ -194,24 +178,24 @@ export default function register(api: any) {
   );
 
   // ============================================================
-  // 6. 注册 Tool 1: bind_identity (身份绑定)
-  //    绑定成功后：捕获 session + 启动轮询
+  // 9. 注册 3 个 Tools
   // ============================================================
+
+  // Tool 1: bind_identity
   api.registerTool({
     ...bindIdentitySchema,
     async execute(_id: string, params: any) {
       const handler = createBindIdentityHandler(apiClient, () => {
-        pollingManager.start();
+        if (!pollingManager.isRunning()) {
+          pollingManager.start();
+        }
       });
       const result = await handler(params);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
 
-  // ============================================================
-  // 7. 注册 Tool 2: initiate_meeting (发起会议协商)
-  //    调用时也捕获 session（兜底：万一绑定时没捕获到）
-  // ============================================================
+  // Tool 2: initiate_meeting
   api.registerTool({
     ...initiateMeetingSchema,
     async execute(_id: string, params: any) {
@@ -221,9 +205,7 @@ export default function register(api: any) {
     },
   });
 
-  // ============================================================
-  // 8. 注册 Tool 3: check_and_respond_tasks (轮询+响应)
-  // ============================================================
+  // Tool 3: check_and_respond_tasks
   const checkHandler = createCheckAndRespondTasksHandler(apiClient);
   api.registerTool({
     ...checkAndRespondTasksSchema,
@@ -234,12 +216,12 @@ export default function register(api: any) {
   });
 
   // ============================================================
-  // 9. 注册 CLI 命令
+  // 10. 注册 CLI 命令
   // ============================================================
   api.registerCli?.(
     ({ program }: any) => {
       program
-        .command("ClawSync-status")
+        .command("clawsync-status")
         .description("查看 ClawSync 插件状态")
         .action(() => {
           const creds = loadCredentials();
@@ -256,32 +238,37 @@ export default function register(api: any) {
             console.log("身份状态: 未绑定");
           }
           if (session?.sessionKey) {
-            console.log(`绑定 Session: ${session.sessionKey}`);
+            console.log(`Session: ${session.sessionKey}`);
           } else {
-            console.log("Session: 未捕获");
+            console.log("Session: 使用默认值 agent:main:main");
           }
         });
     },
-    { commands: ["ClawSync-status"] },
+    { commands: ["clawsync-status"] },
   );
 
   // ============================================================
-  // 10. 注册 Agent System Prompt 注入（使用官方 before_prompt_build API）
-  //     让 Agent 了解 ClawSync 插件的能力，并在用户未绑定时主动引导
+  // 11. before_prompt_build（文档化 API: api.on）
+  //     三个职责：
+  //     a) 从 event 中捕获/更新 session
+  //     b) 注入 system prompt（引导绑定 或 功能说明）
+  //     c) 推送轮询发现的待办通知（通过 prependContext）
   // ============================================================
   api.on?.(
     "before_prompt_build",
     (event: any, ctx: any) => {
-      // 从 prompt build 上下文中捕获 session（每次用户发消息都会触发）
-      const sessionKey = event?.sessionKey ?? event?.session?.key ?? ctx?.sessionKey ?? ctx?.session?.key;
+      // --- a) Session 捕获 ---
+      const sessionKey = event?.sessionKey ?? event?.session?.key
+        ?? ctx?.sessionKey ?? ctx?.session?.key;
       const channel = event?.channel ?? ctx?.channel;
       const peerId = event?.peerId ?? event?.peer?.id ?? ctx?.peerId ?? ctx?.peer?.id;
       if (sessionKey && sessionKey !== sessionCtx?.sessionKey) {
         sessionCtx = { sessionKey, channel, peerId };
         saveSession(sessionCtx);
-        console.log(`[ClawSync] 从 prompt hook 捕获 session: ${sessionKey}`);
+        console.log(`[ClawSync] session 已更新: ${sessionKey}`);
       }
 
+      // --- b) System prompt 注入 ---
       const creds = loadCredentials();
       const isBound = !!creds?.token;
 
@@ -289,23 +276,36 @@ export default function register(api: any) {
         ? [
             "[ClawSync 会议助手已就绪]",
             `当前绑定邮箱: ${creds!.email}，后台轮询运行中。`,
-            '用户可以直接说「帮我约某某开会」来发起会议协商，',
-            '或说「有没有新的会议邀请」来手动检查待办任务。',
-            '会议在对话中用标题称呼（如「项目讨论会」），不需要让用户记 ID。',
+            "用户可以直接说「帮我约某某开会」来发起会议协商，",
+            "或说「有没有新的会议邀请」来手动检查待办任务。",
+            "会议在对话中用标题称呼（如「项目讨论会」），不需要让用户记 ID。",
           ].join("\n")
         : [
             "[ClawSync 会议助手 - 需要初始化]",
             "用户尚未绑定身份。当用户首次与你对话时，请友好地引导用户提供邮箱来完成绑定。",
-            '你可以说：「我注意到你还没有激活会议助手 ClawSync。它可以帮你一句话约会议、自动处理邀请。',
-            '要开始使用，请告诉我你的邮箱地址，我来帮你注册。」',
+            "你可以说：「我注意到你还没有激活会议助手 ClawSync。它可以帮你一句话约会议、自动处理邀请。",
+            "要开始使用，请告诉我你的邮箱地址，我来帮你注册。」",
             "",
             "绑定成功后用户可以：",
-            '- 一句话发起会议（如「帮我约 Bob 明天开会」）',
+            "- 一句话发起会议（如「帮我约 Bob 明天开会」）",
             "- 自动处理收到的会议邀请（后台静默完成）",
             "- 收到妥协建议时在这里做决定",
           ].join("\n");
 
-      return { appendSystemContext: systemPromptAddon };
+      const result: any = { appendSystemContext: systemPromptAddon };
+
+      // --- c) 推送轮询发现的待办通知 ---
+      if (pendingNotifications.length > 0) {
+        result.prependContext = [
+          "[ClawSync 后台轮询发现新任务]",
+          ...pendingNotifications,
+          "",
+          "请调用 check_and_respond_tasks 工具获取详细信息并处理。",
+        ].join("\n");
+        pendingNotifications = [];
+      }
+
+      return result;
     },
     { priority: 5 },
   );
