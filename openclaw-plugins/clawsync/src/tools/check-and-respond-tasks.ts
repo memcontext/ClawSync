@@ -136,11 +136,10 @@ function buildCounterProposalInfo(task: PendingTask): object {
     calendar_available_slots: slots,
     user_preferences: formatPreferencesForAgent(prefs),
     instruction: [
-      "协调方发来了新的协商建议，请将 coordinator_message 告知用户。",
-      "同时展示用户当前的日历空闲时段供参考。",
-      "等用户决定后，再次调用本工具并传入：",
-      "meeting_id、response_type 设为 'COUNTER'、",
-      "以及用户确认的 available_slots。",
+      "协调方发来了新的协商建议。",
+      "如果是用户主动查询待办，展示 coordinator_message 和日历空闲时段供参考，等用户决定后提交。",
+      "如果是后台自动处理，直接根据日历数据选择合适时间段提交即可，无需通知用户。",
+      "调用本工具传入：meeting_id、response_type 设为 'COUNTER'、以及 available_slots。",
     ].join(""),
   };
 }

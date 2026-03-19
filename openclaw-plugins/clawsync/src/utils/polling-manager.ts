@@ -4,10 +4,10 @@
 //
 // 设计要点（高可扩展性）：
 // - 独立于 Tool 和 Hook，可由任意位置触发 start/stop
-// - onPoll 回调解耦具体轮询逻辑，后续可插入中间件
-// - onNeedAgentAction 回调：轮询发现任务时
-//   通过 api.sendMessage 向用户 session 注入消息，唤醒 Agent
-// - 预留 onTaskReceived 钩子，后续容忍度/自动决策可在此注入
+// - onPoll 回调解耦具体轮询逻辑
+// - onAutoRespond 回调：轮询发现任务时
+//   插件自行读取日历并自动提交，不唤醒 Agent
+//   只在会议确认/无法调和时通过 onNotifyUser 通知用户
 // - 支持动态调整轮询间隔（如服务端繁忙时自动退避）
 // ============================================================
 
@@ -16,16 +16,21 @@ export interface PollingManagerOptions {
   intervalMs: number;
   /** 是否启用轮询 */
   enabled: boolean;
-  /** 每次轮询执行的回调，返回 check_and_respond_tasks 的结果 */
+  /** 每次轮询执行的回调，返回 pending tasks 的原始结果 */
   onPoll: () => Promise<unknown>;
   /**
-   * 轮询发现需要 Agent 处理的任务时调用
-   * 包括 INITIAL_SUBMIT（Agent 读日历提交）和 COUNTER_PROPOSAL（Agent 问用户）
+   * 轮询发现需要处理的任务时调用（异步）
+   * 插件自行读日历 + 提交，不通知用户
+   * 返回需要通知用户的消息列表（如会议确认/冲突无法解决）
    */
-  onNeedAgentAction?: (tasks: unknown[]) => void;
+  onAutoRespond?: (tasks: unknown[]) => Promise<string[]>;
+  /**
+   * 当有需要通知用户的消息时调用
+   * 仅用于：会议最终确认、多轮协商无法调和
+   */
+  onNotifyUser?: (messages: string[]) => void;
   /**
    * [扩展点] 轮询拿到结果后的钩子
-   * 后续可在此注入容忍度判断、自动决策等中间件
    */
   onTaskReceived?: (result: unknown) => void;
 }
@@ -63,14 +68,19 @@ export class PollingManager {
         // [扩展点] 通知下游处理器
         this.options.onTaskReceived?.(result);
 
-        // 检查是否有需要 Agent 处理的任务，如果有则推送通知
+        // 检查是否有需要处理的任务
         const taskResults = (result as any)?.task_results as unknown[];
         if (taskResults?.length) {
-          const needsAgent = taskResults.filter(
+          const needsAction = taskResults.filter(
             (t: any) => t.action === "NEEDS_AGENT_ACTION",
           );
-          if (needsAgent.length > 0) {
-            this.options.onNeedAgentAction?.(needsAgent);
+          if (needsAction.length > 0 && this.options.onAutoRespond) {
+            // 自动处理，不唤醒 Agent
+            const userMessages = await this.options.onAutoRespond(needsAction);
+            // 只有确实需要通知用户的消息才推送
+            if (userMessages.length > 0 && this.options.onNotifyUser) {
+              this.options.onNotifyUser(userMessages);
+            }
           }
         }
       } catch (err) {
