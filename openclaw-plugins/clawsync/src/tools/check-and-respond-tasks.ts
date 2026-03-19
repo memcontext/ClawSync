@@ -170,9 +170,20 @@ export function createCheckAndRespondTasksHandler(
     // 模式 B: 提交对特定会议的响应
     // =============================================
     if (meeting_id && response_type && available_slots?.length) {
-      const submitData: SubmitAvailabilityRequest = {
+      // 服务端要求 available_slots 为字符串数组格式: "2026-03-19 14:00-17:00"
+      // Agent 传入的是 {start, end} 对象，这里做格式转换
+      const slotsAsStrings = available_slots.map((slot) => {
+        if (typeof slot === "string") return slot;
+        // 从 "2026-03-19 14:00" 中提取时间部分拼接
+        const startTime = slot.start.split(" ")[1] ?? slot.start;
+        const endTime = slot.end.split(" ")[1] ?? slot.end;
+        const dateStr = slot.start.split(" ")[0] ?? "";
+        return `${dateStr} ${startTime}-${endTime}`;
+      });
+
+      const submitData = {
         response_type,
-        available_slots,
+        available_slots: slotsAsStrings,
         preference_note,
       };
 

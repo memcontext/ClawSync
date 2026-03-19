@@ -89,25 +89,8 @@ export default function register(api: any) {
     console.log(`[ClawSync] 已恢复 session: ${sessionCtx.sessionKey}`);
   }
 
-  /**
-   * 从 OpenClaw Tool 调用的 context 中提取 session 信息
-   * OpenClaw 在调用 Tool handler 时会传入 ctx 作为第二个参数，
-   * 其中包含 sessionKey, channel, peerId 等信息
-   */
-  function captureSession(ctx: any): void {
-    if (!ctx) return;
-    const newSession: SessionContext = {
-      sessionKey: ctx.sessionKey ?? ctx.session?.key,
-      channel: ctx.channel,
-      peerId: ctx.peerId ?? ctx.peer?.id,
-    };
-    // 只在有有效 sessionKey 时保存
-    if (newSession.sessionKey) {
-      sessionCtx = newSession;
-      saveSession(newSession);
-      console.log(`[ClawSync] 已捕获 session: ${newSession.sessionKey}`);
-    }
-  }
+  // Session 捕获已移至 before_prompt_build 钩子中
+  // 每次用户发消息时自动从事件上下文中提取 session 信息
 
   /**
    * 向用户 session 推送一条消息，唤醒 Agent 处理
@@ -208,10 +191,7 @@ export default function register(api: any) {
   // ============================================================
   api.registerTool({
     ...bindIdentitySchema,
-    async execute(_id: string, params: any, ctx: any) {
-      // 捕获当前 session（绑定时的对话就是主 session）
-      captureSession(ctx);
-
+    async execute(_id: string, params: any) {
       const handler = createBindIdentityHandler(apiClient, () => {
         pollingManager.start();
       });
@@ -226,8 +206,7 @@ export default function register(api: any) {
   // ============================================================
   api.registerTool({
     ...initiateMeetingSchema,
-    async execute(_id: string, params: any, ctx: any) {
-      captureSession(ctx);
+    async execute(_id: string, params: any) {
       const handler = createInitiateMeetingHandler(apiClient);
       const result = await handler(params);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -284,7 +263,17 @@ export default function register(api: any) {
   // ============================================================
   api.on?.(
     "before_prompt_build",
-    () => {
+    (event: any, ctx: any) => {
+      // 从 prompt build 上下文中捕获 session（每次用户发消息都会触发）
+      const sessionKey = event?.sessionKey ?? event?.session?.key ?? ctx?.sessionKey ?? ctx?.session?.key;
+      const channel = event?.channel ?? ctx?.channel;
+      const peerId = event?.peerId ?? event?.peer?.id ?? ctx?.peerId ?? ctx?.peer?.id;
+      if (sessionKey && sessionKey !== sessionCtx?.sessionKey) {
+        sessionCtx = { sessionKey, channel, peerId };
+        saveSession(sessionCtx);
+        console.log(`[ClawSync] 从 prompt hook 捕获 session: ${sessionKey}`);
+      }
+
       const creds = loadCredentials();
       const isBound = !!creds?.token;
 
