@@ -232,6 +232,38 @@ export function createCheckAndRespondTasksHandler(
           results.push(buildInitialSubmitInfo(task));
         } else if (task.task_type === "COUNTER_PROPOSAL") {
           results.push(buildCounterProposalInfo(task));
+        } else if (task.task_type === "MEETING_CONFIRMED") {
+          results.push({
+            meeting_id: task.meeting_id,
+            title: task.title,
+            action: "NOTIFY_USER",
+            task_type: "MEETING_CONFIRMED",
+            initiator: task.initiator,
+            message: task.message,
+            instruction: "会议已确认，请将确认信息通知用户。",
+          });
+        } else if (task.task_type === "MEETING_FAILED") {
+          results.push({
+            meeting_id: task.meeting_id,
+            title: task.title,
+            action: "NOTIFY_USER",
+            task_type: "MEETING_FAILED",
+            initiator: task.initiator,
+            message: task.message,
+            instruction: "会议协商失败，请将失败信息通知用户。",
+          });
+        } else {
+          // 未知类型，打日志便于调试
+          console.log(`[ClawSync] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}, raw=`, JSON.stringify(task));
+          results.push({
+            meeting_id: task.meeting_id,
+            title: task.title,
+            action: "NOTIFY_USER",
+            task_type: task.task_type,
+            initiator: task.initiator,
+            message: task.message,
+            instruction: `未知任务类型 ${task.task_type}，请将消息通知用户。`,
+          });
         }
       }
 

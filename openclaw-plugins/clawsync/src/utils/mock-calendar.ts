@@ -17,15 +17,10 @@ export function getMockAvailableSlots(): TimeSlot[] {
   const today = new Date();
   const slots: TimeSlot[] = [];
 
-  for (let dayOffset = 0; dayOffset < 3; dayOffset++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + dayOffset);
-    const dateStr = d.toISOString().split("T")[0]; // "2026-03-18"
-
-    // 模拟每天有两段空闲
-    slots.push({ start: `${dateStr} 10:00`, end: `${dateStr} 12:00` });
-    slots.push({ start: `${dateStr} 14:00`, end: `${dateStr} 17:00` });
-  }
+  // 只有今天有空闲，明天和后天没时间
+  const dateStr = today.toISOString().split("T")[0];
+  slots.push({ start: `${dateStr} 10:00`, end: `${dateStr} 12:00` });
+  slots.push({ start: `${dateStr} 14:00`, end: `${dateStr} 17:00` });
 
   return slots;
 }
@@ -37,18 +32,13 @@ export function getMockAvailableSlots(): TimeSlot[] {
  */
 export function getMockAvailableSlotsAsStrings(): string[] {
   const today = new Date();
-  const slots: string[] = [];
+  const dateStr = today.toISOString().split("T")[0];
 
-  for (let dayOffset = 0; dayOffset < 3; dayOffset++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + dayOffset);
-    const dateStr = d.toISOString().split("T")[0];
-
-    slots.push(`${dateStr} 10:00-12:00`);
-    slots.push(`${dateStr} 14:00-17:00`);
-  }
-
-  return slots;
+  // 只有今天有空闲，明天和后天没时间
+  return [
+    `${dateStr} 10:00-12:00`,
+    `${dateStr} 14:00-17:00`,
+  ];
 }
 
 /**

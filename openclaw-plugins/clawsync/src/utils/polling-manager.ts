@@ -68,15 +68,15 @@ export class PollingManager {
         // [扩展点] 通知下游处理器
         this.options.onTaskReceived?.(result);
 
-        // 检查是否有需要处理的任务
+        // 检查是否有需要处理的任务（包括自动提交和通知类）
         const taskResults = (result as any)?.task_results as unknown[];
         if (taskResults?.length) {
-          const needsAction = taskResults.filter(
-            (t: any) => t.action === "NEEDS_AGENT_ACTION",
+          const actionable = taskResults.filter(
+            (t: any) => t.action === "NEEDS_AGENT_ACTION" || t.action === "NOTIFY_USER",
           );
-          if (needsAction.length > 0 && this.options.onAutoRespond) {
+          if (actionable.length > 0 && this.options.onAutoRespond) {
             // 自动处理，不唤醒 Agent
-            const userMessages = await this.options.onAutoRespond(needsAction);
+            const userMessages = await this.options.onAutoRespond(actionable);
             // 只有确实需要通知用户的消息才推送
             if (userMessages.length > 0 && this.options.onNotifyUser) {
               this.options.onNotifyUser(userMessages);
