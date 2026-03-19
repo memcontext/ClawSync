@@ -71,6 +71,27 @@ export function loadPreferences(): UserPreferences {
   }
 }
 
+// ---- 已通知会议记录（去重用） ----
+
+const NOTIFIED_FILE_NAME = "notified-meetings.json";
+
+export function saveNotifiedMeetings(meetingIds: string[]): void {
+  ensureDir();
+  const filePath = join(STORAGE_DIR, NOTIFIED_FILE_NAME);
+  writeFileSync(filePath, JSON.stringify(meetingIds), "utf-8");
+}
+
+export function loadNotifiedMeetings(): string[] {
+  const filePath = join(STORAGE_DIR, NOTIFIED_FILE_NAME);
+  if (!existsSync(filePath)) return [];
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    return JSON.parse(raw) as string[];
+  } catch {
+    return [];
+  }
+}
+
 // ---- Session 上下文 ----
 // 记录用户绑定时的 session，确保轮询推送回到同一个对话窗口
 
