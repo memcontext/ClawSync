@@ -1,0 +1,26 @@
+{
+  "id": "clawsync",
+  "name": "ClawSync Meeting Negotiator",
+  "version": "1.0.0",
+  "description": "智能会议协商代理插件 - 作为用户的贴身助理，负责收集情报、保护隐私并代表用户进行初步博弈",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "serverUrl": {
+        "type": "string",
+        "description": "中央协调端 API Server 地址",
+        "default": "http://localhost:8000"
+      },
+      "pollingIntervalMs": {
+        "type": "number",
+        "description": "轮询待办任务的间隔（毫秒）",
+        "default": 10000
+      },
+      "autoRespond": {
+        "type": "boolean",
+        "description": "是否自动响应 INITIAL_SUBMIT 类型任务",
+        "default": true
+      }
+    }
+  }
+}
