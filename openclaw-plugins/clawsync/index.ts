@@ -165,9 +165,11 @@ export default function register(api: any) {
   }
 
   // ============================================================
-  // 6. 通知去重：从文件恢复已通知的 meeting_id
+  // 6. 通知去重 + 提交去重
   // ============================================================
   const notifiedMeetings = new Set<string>(loadNotifiedMeetings());
+  // 记录已成功提交但仍在 COLLECTING 的会议，避免无限重试
+  const submittedMeetings = new Set<string>();
   if (notifiedMeetings.size > 0) {
     console.log(`[ClawSync] 已恢复 ${notifiedMeetings.size} 个已通知会议记录`);
   }
@@ -250,6 +252,11 @@ export default function register(api: any) {
 
       // ---- INITIAL_SUBMIT / COUNTER_PROPOSAL：自动读日历提交 ----
       if (taskType === "INITIAL_SUBMIT" || taskType === "COUNTER_PROPOSAL") {
+        // 防止对同一会议无限重复提交（服务端 bug：自己邀请自己时 all_submitted 永远 false）
+        if (submittedMeetings.has(meetingId)) {
+          continue;
+        }
+
         const responseType = taskType === "INITIAL_SUBMIT" ? "INITIAL" : "COUNTER";
 
         try {
@@ -261,6 +268,9 @@ export default function register(api: any) {
           console.log(
             `[ClawSync] 自动提交「${title}」(${meetingId}) → ${responseType}, status=${result.status}`,
           );
+
+          // 记录已提交，防止下次轮询重复提交
+          submittedMeetings.add(meetingId);
 
           // 提交后即时返回 CONFIRMED —— 构造与服务端 MEETING_CONFIRMED 一致的 message 格式
           if (result.coordinator_result?.status === "CONFIRMED" && result.coordinator_result?.final_time) {
@@ -333,13 +343,17 @@ export default function register(api: any) {
     onPoll: async () => {
       const result = await taskHandler({});
       const taskResults = (result as any).task_results ?? [];
-      // 只对 CONFIRMED/FAILED 做通知去重；INITIAL_SUBMIT/COUNTER_PROPOSAL 始终放行
       const newTasks = taskResults.filter((t: any) => {
         const tt = t.task_type;
+        // CONFIRMED/FAILED：通知去重
         if (tt === "MEETING_CONFIRMED" || tt === "MEETING_FAILED") {
           return !notifiedMeetings.has(t.meeting_id);
         }
-        return true; // INITIAL_SUBMIT / COUNTER_PROPOSAL 不过滤
+        // INITIAL_SUBMIT/COUNTER_PROPOSAL：已提交过的不再重试
+        if (tt === "INITIAL_SUBMIT" || tt === "COUNTER_PROPOSAL") {
+          return !submittedMeetings.has(t.meeting_id);
+        }
+        return true;
       });
       if (newTasks.length > 0) {
         console.log(`[ClawSync] 轮询发现 ${newTasks.length} 个新待办任务`);
