@@ -6,7 +6,7 @@ ClawSync Agent 配置文件
 
 # ─── LLM 配置（豆包 / 火山方舟） ─────────────────────────────────────────────
 LLM_MODEL = "doubao-1-5-pro-32k-250115"
-LLM_API_KEY = "c4d34f89-32e8-4c59-ad87-2029e083c307"
+LLM_API_KEY = "XXX"
 LLM_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 LLM_TEMPERATURE = 0
 
