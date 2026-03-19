@@ -22,6 +22,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from typing import Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
+from ..config import LLM_MODEL, LLM_API_KEY, LLM_BASE_URL, LLM_TEMPERATURE
+
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
 # 所有会议 JSON 文件统一存放于项目根目录的 meeting_time_data 文件夹
@@ -168,13 +170,11 @@ def _build_chain():
     构建 LangChain 链：
       ChatPromptTemplate → ChatAnthropic.with_structured_output(AvailabilityOutput)
     """
-    # 豆包 Pro 32K，通过火山方舟 OpenAI 兼容接口接入
-    # TODO: 生产环境请将 API Key 移至环境变量，避免泄露
     llm = ChatOpenAI(
-        model="doubao-1-5-pro-32k-250115",
-        api_key="c4d34f89-32e8-4c59-ad87-2029e083c307",
-        base_url="https://ark.cn-beijing.volces.com/api/v3",
-        temperature=0,
+        model=LLM_MODEL,
+        api_key=LLM_API_KEY,
+        base_url=LLM_BASE_URL,
+        temperature=LLM_TEMPERATURE,
     )
     structured_llm = llm.with_structured_output(AvailabilityOutput)
 

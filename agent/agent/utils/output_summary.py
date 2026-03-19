@@ -19,6 +19,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, field_validator
 
 from .agent_input_format import DATA_DIR, TIME_SLOTS
+from ..config import LLM_MODEL, LLM_API_KEY, LLM_BASE_URL, LLM_TEMPERATURE
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
@@ -206,10 +207,10 @@ def _build_participants_summary(
 
 def _build_confirmed_chain():
     llm = ChatOpenAI(
-        model="doubao-1-5-pro-32k-250115",
-        api_key="c4d34f89-32e8-4c59-ad87-2029e083c307",
-        base_url="https://ark.cn-beijing.volces.com/api/v3",
-        temperature=0,
+        model=LLM_MODEL,
+        api_key=LLM_API_KEY,
+        base_url=LLM_BASE_URL,
+        temperature=LLM_TEMPERATURE,
     )
 
     system_prompt = (
@@ -241,10 +242,10 @@ def _build_confirmed_chain():
 
 def _build_negotiating_chain():
     llm = ChatOpenAI(
-        model="doubao-1-5-pro-32k-250115",
-        api_key="c4d34f89-32e8-4c59-ad87-2029e083c307",
-        base_url="https://ark.cn-beijing.volces.com/api/v3",
-        temperature=0,
+        model=LLM_MODEL,
+        api_key=LLM_API_KEY,
+        base_url=LLM_BASE_URL,
+        temperature=LLM_TEMPERATURE,
     )
 
     system_prompt = (
