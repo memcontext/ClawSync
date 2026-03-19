@@ -9,7 +9,7 @@
       "serverUrl": {
         "type": "string",
         "description": "中央协调端 API Server 地址",
-        "default": "http://localhost:8000"
+        "default": "http://192.168.22.28:8000"
       },
       "pollingIntervalMs": {
         "type": "number",

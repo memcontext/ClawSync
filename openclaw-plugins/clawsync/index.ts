@@ -39,7 +39,7 @@ import type { ClawSyncPluginConfig, SessionContext } from "./src/types/index.js"
 
 // ---- 默认配置 ----
 const DEFAULT_CONFIG: ClawSyncPluginConfig = {
-  serverUrl: "http://localhost:8000",
+  serverUrl: "http://192.168.22.28:8000",
   pollingIntervalMs: 10000,
   autoRespond: true,
 };
