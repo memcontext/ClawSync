@@ -172,18 +172,26 @@ export default function register(api: any) {
   //    如果此时还没绑定（没有 Token），轮询不会启动，
   //    等用户调 bind_identity 成功后再通过回调启动。
   // ============================================================
-  api.registerHook?.("after_agent_start", () => {
-    if (apiClient.getToken()) {
-      console.log("[ClawSync] Gateway 已就绪，启动后台轮询。");
-      pollingManager.start();
-    } else {
-      console.log("[ClawSync] Gateway 已就绪，但尚未绑定身份，轮询待命中。");
-    }
-  });
+  api.registerHook?.(
+    "after_agent_start",
+    () => {
+      if (apiClient.getToken()) {
+        console.log("[ClawSync] Gateway 已就绪，启动后台轮询。");
+        pollingManager.start();
+      } else {
+        console.log("[ClawSync] Gateway 已就绪，但尚未绑定身份，轮询待命中。");
+      }
+    },
+    { name: "clawsync.after-agent-start", description: "Gateway 就绪后启动轮询" },
+  );
 
-  api.registerHook?.("before_agent_stop", () => {
-    pollingManager.stop();
-  });
+  api.registerHook?.(
+    "before_agent_stop",
+    () => {
+      pollingManager.stop();
+    },
+    { name: "clawsync.before-agent-stop", description: "Gateway 关闭前停止轮询" },
+  );
 
   // ============================================================
   // 6. 注册 Tool 1: bind_identity (身份绑定)
