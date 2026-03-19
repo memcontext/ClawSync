@@ -9,19 +9,29 @@
 import type { TimeSlot, CalendarSlot, UserPreferences } from "../types/index.js";
 
 /**
+ * 工具函数: 获取从今天起 N 天的日期字符串列表
+ */
+function getDateStrings(days: number): string[] {
+  const dates: string[] = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() + i);
+    dates.push(d.toISOString().split("T")[0]!);
+  }
+  return dates;
+}
+
+/**
  * Mock: 获取用户未来 3 天的日历空闲时段
  * 返回格式与服务端 API 5 要求的 available_slots 对齐
  * e.g. { start: "2026-03-18 14:00", end: "2026-03-18 17:00" }
  */
 export function getMockAvailableSlots(): TimeSlot[] {
-  const today = new Date();
   const slots: TimeSlot[] = [];
-
-  // 只有今天有空闲，明天和后天没时间
-  const dateStr = today.toISOString().split("T")[0];
-  slots.push({ start: `${dateStr} 10:00`, end: `${dateStr} 12:00` });
-  slots.push({ start: `${dateStr} 14:00`, end: `${dateStr} 17:00` });
-
+  for (const dateStr of getDateStrings(3)) {
+    slots.push({ start: `${dateStr} 10:00`, end: `${dateStr} 12:00` });
+    slots.push({ start: `${dateStr} 14:00`, end: `${dateStr} 17:00` });
+  }
   return slots;
 }
 
@@ -31,14 +41,12 @@ export function getMockAvailableSlots(): TimeSlot[] {
  * e.g. "2026-03-18 14:00-18:00"
  */
 export function getMockAvailableSlotsAsStrings(): string[] {
-  const today = new Date();
-  const dateStr = today.toISOString().split("T")[0];
-
-  // 只有今天有空闲，明天和后天没时间
-  return [
-    `${dateStr} 10:00-12:00`,
-    `${dateStr} 14:00-17:00`,
-  ];
+  const slots: string[] = [];
+  for (const dateStr of getDateStrings(3)) {
+    slots.push(`${dateStr} 10:00-12:00`);
+    slots.push(`${dateStr} 14:00-17:00`);
+  }
+  return slots;
 }
 
 /**

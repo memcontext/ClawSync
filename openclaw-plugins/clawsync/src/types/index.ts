@@ -56,28 +56,84 @@ export type ResponseType = "INITIAL" | "COUNTER";
 
 export interface SubmitAvailabilityRequest {
   response_type: ResponseType;
-  available_slots: TimeSlot[];
+  available_slots: string[];  // 服务端实际要求字符串格式 "2026-03-18 14:00-16:00"
   preference_note?: string;
+}
+
+/** coordinator_result 子结构 */
+export interface CoordinatorResult {
+  status: string;            // "CONFIRMED" | "NEGOTIATING" | "FAILED" | "NO_MATCH"
+  final_time?: string;       // 确认时的最终时间
+  reasoning?: string;        // 协调推理说明
+  suggestions?: string[];    // 协商建议
+  alternative_slots?: string[];
 }
 
 export interface SubmitAvailabilityResponse {
   id: string;
   response_type: ResponseType;
-  status: string;
+  status: MeetingStatus;
   all_submitted: boolean;
-  coordinator_result?: {
-    status: string;
-    final_time?: string;
-    reasoning?: string;
-    suggestions?: string[];
-    alternative_slots?: string[];
-  };
+  coordinator_result?: CoordinatorResult;
   created_at: string;
   updated_at: string;
 }
 
+// ---- 会议状态机 ----
+// PENDING → COLLECTING → ANALYZING → CONFIRMED / NEGOTIATING → FAILED
+export type MeetingStatus =
+  | "PENDING"
+  | "COLLECTING"
+  | "ANALYZING"
+  | "NEGOTIATING"
+  | "CONFIRMED"
+  | "FAILED";
+
+// ---- API 3: GET /api/meetings 会议列表 ----
+export interface MeetingListItem {
+  meeting_id: string;
+  title: string;
+  status: MeetingStatus;
+  my_role: "initiator" | "participant";
+  action_required: boolean;
+  initiator_email: string;
+  duration_minutes: number;
+  round_count: number;
+  final_time: string | null;
+  progress: string;            // "1/3"
+  created_at: string;
+}
+
+export interface MeetingListResponse {
+  total: number;
+  meetings: MeetingListItem[];
+}
+
+// ---- API 4: GET /api/meetings/{id} 会议详情 ----
+export interface MeetingParticipant {
+  email: string;
+  role: "initiator" | "participant";
+  has_submitted: boolean;
+  latest_slots: string[];
+  preference_note: string | null;
+}
+
+export interface MeetingDetailResponse {
+  meeting_id: string;
+  title: string;
+  status: MeetingStatus;
+  round_count: number;
+  final_time: string | null;
+  coordinator_reasoning: string | null;
+  participants: MeetingParticipant[];
+}
+
 // ---- API 6: GET /api/tasks/pending 获取待办任务 ----
-export type TaskType = "INITIAL_SUBMIT" | "COUNTER_PROPOSAL";
+export type TaskType =
+  | "INITIAL_SUBMIT"
+  | "COUNTER_PROPOSAL"
+  | "MEETING_CONFIRMED"
+  | "MEETING_FAILED";
 
 export interface PendingTask {
   meeting_id: string;
@@ -85,6 +141,8 @@ export interface PendingTask {
   initiator: string;
   task_type: TaskType;
   message: string;
+  duration_minutes?: number;
+  round_count?: number;
 }
 
 export interface PendingTasksResponse {

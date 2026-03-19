@@ -5,9 +5,11 @@
 //   POST /api/meetings/{id}/submit   — 提交空闲时间
 //
 // 核心工作流:
-//   轮询拉取任务 → 所有任务类型都交给 Agent 处理:
+//   轮询拉取任务 → 根据 task_type 分发处理:
 //   INITIAL_SUBMIT     → Agent 读取日历，组装时间段，调用本 Tool 提交
 //   COUNTER_PROPOSAL   → Agent 展示协调方建议，等用户决策后调用本 Tool 提交
+//   MEETING_CONFIRMED  → 通知用户会议已确认
+//   MEETING_FAILED     → 通知用户协商失败
 //
 // Agent 使用本 Tool 的两种模式:
 //   模式 A: 无参数调用 → 拉取待办任务列表
@@ -21,7 +23,6 @@ import type {
   PendingTask,
   ResponseType,
   TimeSlot,
-  SubmitAvailabilityRequest,
 } from "../types/index.js";
 import {
   getMockAvailableSlots,
@@ -81,7 +82,7 @@ export const checkAndRespondTasksSchema = {
           required: ["start", "end"],
         },
         description:
-          "可用时间段列表。Agent 应根据日历数据填充此字段。",
+          "可用时间段列表。Agent 传入 {start, end} 对象，工具内部会转为服务端要求的字符串格式。",
       },
       preference_note: {
         type: "string" as const,
@@ -93,7 +94,6 @@ export const checkAndRespondTasksSchema = {
 };
 
 // ---- 内部: 构建 INITIAL_SUBMIT 任务的返回信息 ----
-// 不自动提交，返回日历数据和指令，交给 Agent 处理
 function buildInitialSubmitInfo(task: PendingTask): object {
   const slots = getMockAvailableSlots();
   const prefs = getMockUserPreferences();
@@ -104,8 +104,9 @@ function buildInitialSubmitInfo(task: PendingTask): object {
     action: "NEEDS_AGENT_ACTION",
     task_type: "INITIAL_SUBMIT",
     initiator: task.initiator,
+    duration_minutes: task.duration_minutes ?? null,
+    round_count: task.round_count ?? 0,
     server_message: task.message,
-    // 提供日历数据供 Agent 使用
     calendar_available_slots: slots,
     user_preferences: formatPreferencesForAgent(prefs),
     instruction: [
@@ -120,7 +121,6 @@ function buildInitialSubmitInfo(task: PendingTask): object {
 }
 
 // ---- 内部: 构建 COUNTER_PROPOSAL 任务的返回信息 ----
-// 需要用户决策，返回协调方建议
 function buildCounterProposalInfo(task: PendingTask): object {
   const slots = getMockAvailableSlots();
   const prefs = getMockUserPreferences();
@@ -131,8 +131,9 @@ function buildCounterProposalInfo(task: PendingTask): object {
     action: "NEEDS_AGENT_ACTION",
     task_type: "COUNTER_PROPOSAL",
     initiator: task.initiator,
+    duration_minutes: task.duration_minutes ?? null,
+    round_count: task.round_count ?? 0,
     coordinator_message: task.message,
-    // 同样提供日历数据供参考
     calendar_available_slots: slots,
     user_preferences: formatPreferencesForAgent(prefs),
     instruction: [
@@ -141,6 +142,34 @@ function buildCounterProposalInfo(task: PendingTask): object {
       "如果是后台自动处理，直接根据日历数据选择合适时间段提交即可，无需通知用户。",
       "调用本工具传入：meeting_id、response_type 设为 'COUNTER'、以及 available_slots。",
     ].join(""),
+  };
+}
+
+// ---- 内部: 构建 MEETING_CONFIRMED 通知 ----
+function buildConfirmedInfo(task: PendingTask): object {
+  return {
+    meeting_id: task.meeting_id,
+    title: task.title,
+    action: "NOTIFY_USER",
+    task_type: "MEETING_CONFIRMED",
+    initiator: task.initiator,
+    duration_minutes: task.duration_minutes ?? null,
+    message: task.message,
+    instruction: "会议已确认，请将确认信息通知用户。",
+  };
+}
+
+// ---- 内部: 构建 MEETING_FAILED 通知 ----
+function buildFailedInfo(task: PendingTask): object {
+  return {
+    meeting_id: task.meeting_id,
+    title: task.title,
+    action: "NOTIFY_USER",
+    task_type: "MEETING_FAILED",
+    initiator: task.initiator,
+    duration_minutes: task.duration_minutes ?? null,
+    message: task.message,
+    instruction: "会议协商失败，请将失败信息通知用户。",
   };
 }
 
@@ -169,15 +198,14 @@ export function createCheckAndRespondTasksHandler(
     // 模式 B: 提交对特定会议的响应
     // =============================================
     if (meeting_id && response_type && available_slots?.length) {
-      // 服务端要求 available_slots 为字符串数组格式: "2026-03-19 14:00-17:00"
+      // 服务端 API 5 实际要求字符串数组 "2026-03-18 14:00-16:00"
       // Agent 传入的是 {start, end} 对象，这里做格式转换
       const slotsAsStrings = available_slots.map((slot) => {
         if (typeof slot === "string") return slot;
-        // 从 "2026-03-19 14:00" 中提取时间部分拼接
+        const startDate = slot.start.split(" ")[0] ?? "";
         const startTime = slot.start.split(" ")[1] ?? slot.start;
         const endTime = slot.end.split(" ")[1] ?? slot.end;
-        const dateStr = slot.start.split(" ")[0] ?? "";
-        return `${dateStr} ${startTime}-${endTime}`;
+        return `${startDate} ${startTime}-${endTime}`;
       });
 
       const submitData = {
@@ -224,46 +252,38 @@ export function createCheckAndRespondTasksHandler(
         };
       }
 
-      // 所有任务都交给 Agent，不自动处理
       const results: object[] = [];
 
       for (const task of pending_tasks) {
-        if (task.task_type === "INITIAL_SUBMIT") {
-          results.push(buildInitialSubmitInfo(task));
-        } else if (task.task_type === "COUNTER_PROPOSAL") {
-          results.push(buildCounterProposalInfo(task));
-        } else if (task.task_type === "MEETING_CONFIRMED") {
-          results.push({
-            meeting_id: task.meeting_id,
-            title: task.title,
-            action: "NOTIFY_USER",
-            task_type: "MEETING_CONFIRMED",
-            initiator: task.initiator,
-            message: task.message,
-            instruction: "会议已确认，请将确认信息通知用户。",
-          });
-        } else if (task.task_type === "MEETING_FAILED") {
-          results.push({
-            meeting_id: task.meeting_id,
-            title: task.title,
-            action: "NOTIFY_USER",
-            task_type: "MEETING_FAILED",
-            initiator: task.initiator,
-            message: task.message,
-            instruction: "会议协商失败，请将失败信息通知用户。",
-          });
-        } else {
-          // 未知类型，打日志便于调试
-          console.log(`[ClawSync] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}, raw=`, JSON.stringify(task));
-          results.push({
-            meeting_id: task.meeting_id,
-            title: task.title,
-            action: "NOTIFY_USER",
-            task_type: task.task_type,
-            initiator: task.initiator,
-            message: task.message,
-            instruction: `未知任务类型 ${task.task_type}，请将消息通知用户。`,
-          });
+        switch (task.task_type) {
+          case "INITIAL_SUBMIT":
+            results.push(buildInitialSubmitInfo(task));
+            break;
+          case "COUNTER_PROPOSAL":
+            results.push(buildCounterProposalInfo(task));
+            break;
+          case "MEETING_CONFIRMED":
+            results.push(buildConfirmedInfo(task));
+            break;
+          case "MEETING_FAILED":
+            results.push(buildFailedInfo(task));
+            break;
+          default:
+            // 未知类型，日志 + 兜底通知
+            console.log(
+              `[ClawSync] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}, raw=`,
+              JSON.stringify(task),
+            );
+            results.push({
+              meeting_id: task.meeting_id,
+              title: task.title,
+              action: "NOTIFY_USER",
+              task_type: task.task_type,
+              initiator: task.initiator,
+              message: task.message,
+              instruction: `未知任务类型 ${task.task_type}，请将消息通知用户。`,
+            });
+            break;
         }
       }
 

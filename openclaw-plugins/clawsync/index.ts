@@ -42,9 +42,13 @@ import {
   checkAndRespondTasksSchema,
   createCheckAndRespondTasksHandler,
 } from "./src/tools/check-and-respond-tasks.js";
+import {
+  listMeetingsSchema,
+  createListMeetingsHandler,
+} from "./src/tools/list-meetings.js";
 
 // Types
-import type { ClawSyncPluginConfig, SessionContext } from "./src/types/index.js";
+import type { ClawSyncPluginConfig, SessionContext, TaskType } from "./src/types/index.js";
 
 // ---- 默认配置 ----
 const DEFAULT_CONFIG: ClawSyncPluginConfig = {
@@ -177,26 +181,18 @@ export default function register(api: any) {
   // 8. 构建完整会议通知消息（含虚拟会议号）
   // ============================================================
   function buildConfirmedNotification(t: any): string {
-    const title = t.title ?? "未知会议";
     const meetingId = t.meeting_id;
     const meetingNumber = generateMeetingNumber(meetingId);
     const serverMessage = t.message ?? "";
 
-    // 从服务端消息中提取时间和时长信息
+    // 服务端 message 已包含完整信息（标题、时间、时长），直接附加
     const lines = [
-      `📅 会议确认通知`,
-      ``,
-      `会议名称：${title}`,
+      `[ClawSync 会议确认]`,
       `会议号：${meetingNumber}`,
     ];
-
-    // 如果服务端消息包含详细信息，直接附加
     if (serverMessage) {
-      lines.push(`${serverMessage}`);
+      lines.push(serverMessage);
     }
-
-    lines.push(``, `如需查看详情，请说「查看我的会议」。`);
-
     return lines.join("\n");
   }
 
@@ -207,27 +203,26 @@ export default function register(api: any) {
     const serverMessage = t.message ?? "";
 
     const lines = [
-      `⚠️ 会议协商失败通知`,
-      ``,
+      `[ClawSync 协商失败]`,
       `会议名称：${title}`,
       `会议号：${meetingNumber}`,
     ];
-
     if (serverMessage) {
       lines.push(`原因：${serverMessage}`);
     }
-
-    lines.push(``, `如需重新发起协商，请告诉我。`);
-
     return lines.join("\n");
   }
 
   // ============================================================
   // 9. 自动响应逻辑
+  // 关键设计：先收集所有通知 + 同步去重 + 持久化，最后一次性推送
+  // 避免多个 sessions_send 并发触发多个 agent turn 导致重复
   // ============================================================
   async function autoRespondToTasks(tasks: unknown[]): Promise<string[]> {
     const userMessages: string[] = [];
-    const calendarSlots = getMockAvailableSlots();
+    const notifications: string[] = []; // 收集本轮所有通知，最后批量发送
+    // API 5 submit 实际要求字符串数组格式 "2026-03-19 10:00-12:00"（与文档不一致）
+    const calendarSlots = getMockAvailableSlotsAsStrings();
 
     for (const task of tasks) {
       const t = task as any;
@@ -235,38 +230,21 @@ export default function register(api: any) {
       const title = t.title ?? "未知会议";
       const taskType = t.task_type;
 
-      // ---- CONFIRMED：主动推送通知（去重）----
+      // ---- CONFIRMED：收集通知（去重）----
       if (taskType === "MEETING_CONFIRMED") {
         if (notifiedMeetings.has(meetingId)) continue;
         notifiedMeetings.add(meetingId);
-        console.log(`[ClawSync] 会议「${title}」(${meetingId}) 已确认，推送通知`);
-
-        const notification = buildConfirmedNotification(t);
-        const pushed = await pushMessageToSession(
-          `[ClawSync 会议确认] 请将以下会议确认信息通知用户：\n${notification}`
-        );
-
-        // 如果主动推送失败，fallback 到 prependContext
-        if (!pushed) {
-          userMessages.push(notification);
-        }
+        console.log(`[ClawSync] 会议「${title}」(${meetingId}) 已确认`);
+        notifications.push(buildConfirmedNotification(t));
         continue;
       }
 
-      // ---- FAILED：主动推送通知（去重）----
+      // ---- FAILED：收集通知（去重）----
       if (taskType === "MEETING_FAILED") {
         if (notifiedMeetings.has(meetingId)) continue;
         notifiedMeetings.add(meetingId);
-        console.log(`[ClawSync] 会议「${title}」(${meetingId}) 协商失败，推送通知`);
-
-        const notification = buildFailedNotification(t);
-        const pushed = await pushMessageToSession(
-          `[ClawSync 协商失败] 请将以下协商失败信息通知用户：\n${notification}`
-        );
-
-        if (!pushed) {
-          userMessages.push(notification);
-        }
+        console.log(`[ClawSync] 会议「${title}」(${meetingId}) 协商失败`);
+        notifications.push(buildFailedNotification(t));
         continue;
       }
 
@@ -278,39 +256,38 @@ export default function register(api: any) {
           const result = await apiClient.submitAvailability(meetingId, {
             response_type: responseType,
             available_slots: calendarSlots,
-          });
+          } as any);
 
           console.log(
             `[ClawSync] 自动提交「${title}」(${meetingId}) → ${responseType}, status=${result.status}`,
           );
 
-          // 提交后即时返回 CONFIRMED
+          // 提交后即时返回 CONFIRMED —— 构造与服务端 MEETING_CONFIRMED 一致的 message 格式
           if (result.coordinator_result?.status === "CONFIRMED" && result.coordinator_result?.final_time) {
             if (!notifiedMeetings.has(meetingId)) {
               notifiedMeetings.add(meetingId);
-              const notification = buildConfirmedNotification({
+              const duration = t.duration_minutes ?? "";
+              const confirmedMsg = [
+                `✅ 会议已确认！`,
+                `会议：${title}`,
+                `时间：${result.coordinator_result.final_time}`,
+                duration ? `时长：${duration} 分钟` : "",
+              ].filter(Boolean).join("\n");
+              notifications.push(buildConfirmedNotification({
                 ...t,
-                message: `时间：${result.coordinator_result.final_time}\n${result.coordinator_result.reasoning ?? ""}`,
-              });
-              const pushed = await pushMessageToSession(
-                `[ClawSync 会议确认] 请将以下会议确认信息通知用户：\n${notification}`
-              );
-              if (!pushed) userMessages.push(notification);
+                message: confirmedMsg,
+              }));
             }
           }
 
-          // 提交后即时返回 FAILED
+          // 提交后即时返回 FAILED / NO_MATCH
           if (result.coordinator_result?.status === "FAILED" || result.coordinator_result?.status === "NO_MATCH") {
             if (!notifiedMeetings.has(meetingId)) {
               notifiedMeetings.add(meetingId);
-              const notification = buildFailedNotification({
+              notifications.push(buildFailedNotification({
                 ...t,
                 message: result.coordinator_result?.reasoning ?? "超过最大协商轮数",
-              });
-              const pushed = await pushMessageToSession(
-                `[ClawSync 协商失败] 请将以下协商失败信息通知用户：\n${notification}`
-              );
-              if (!pushed) userMessages.push(notification);
+              }));
             }
           }
         } catch (err) {
@@ -324,15 +301,23 @@ export default function register(api: any) {
       if (!notifiedMeetings.has(meetingId)) {
         notifiedMeetings.add(meetingId);
         console.log(`[ClawSync] 未知任务类型「${title}」(${meetingId}) type=${taskType}`);
-        const msg = `📋 会议「${title}」有新消息：${t.message ?? taskType}`;
-        const pushed = await pushMessageToSession(msg);
-        if (!pushed) userMessages.push(msg);
+        notifications.push(`📋 会议「${title}」有新消息：${t.message ?? taskType}`);
       }
     }
 
-    // 持久化已通知的会议列表
+    // ==== 先持久化，再推送（确保不会因重启丢失去重状态）====
     if (notifiedMeetings.size > 0) {
       saveNotifiedMeetings([...notifiedMeetings]);
+    }
+
+    // ==== 批量推送：所有通知合并为一条 sessions_send ====
+    if (notifications.length > 0) {
+      const batchMessage = `[ClawSync 会议通知] 请将以下会议信息逐条通知用户：\n\n${notifications.join("\n\n---\n\n")}`;
+      const pushed = await pushMessageToSession(batchMessage);
+      if (!pushed) {
+        // fallback: 放入 pendingNotifications，等用户下次交互时展示
+        userMessages.push(...notifications);
+      }
     }
 
     return userMessages;
@@ -347,11 +332,15 @@ export default function register(api: any) {
     enabled: pluginConfig.autoRespond,
     onPoll: async () => {
       const result = await taskHandler({});
-      // 过滤掉已通知过的任务
       const taskResults = (result as any).task_results ?? [];
-      const newTasks = taskResults.filter(
-        (t: any) => !notifiedMeetings.has(t.meeting_id),
-      );
+      // 只对 CONFIRMED/FAILED 做通知去重；INITIAL_SUBMIT/COUNTER_PROPOSAL 始终放行
+      const newTasks = taskResults.filter((t: any) => {
+        const tt = t.task_type;
+        if (tt === "MEETING_CONFIRMED" || tt === "MEETING_FAILED") {
+          return !notifiedMeetings.has(t.meeting_id);
+        }
+        return true; // INITIAL_SUBMIT / COUNTER_PROPOSAL 不过滤
+      });
       if (newTasks.length > 0) {
         console.log(`[ClawSync] 轮询发现 ${newTasks.length} 个新待办任务`);
       }
@@ -412,7 +401,7 @@ export default function register(api: any) {
   );
 
   // ============================================================
-  // 14. 注册 3 个 Tools
+  // 14. 注册 4 个 Tools
   // ============================================================
 
   api.registerTool({
@@ -442,6 +431,15 @@ export default function register(api: any) {
     ...checkAndRespondTasksSchema,
     async execute(_id: string, params: any) {
       const result = await checkHandler(params);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  });
+
+  const listHandler = createListMeetingsHandler(apiClient);
+  api.registerTool({
+    ...listMeetingsSchema,
+    async execute(_id: string, params: any) {
+      const result = await listHandler(params);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
@@ -492,16 +490,16 @@ export default function register(api: any) {
         console.log(`[ClawSync] session 已更新: ${sessionKey}`);
       }
 
-      // System prompt 注入
-      const creds = loadCredentials();
-      const isBound = !!creds?.token;
+      // System prompt 注入（用内存变量，避免每次读磁盘）
+      const isBound = !!apiClient.getToken();
 
       const systemPromptAddon = isBound
         ? [
             "[ClawSync 会议助手已就绪]",
-            `当前绑定邮箱: ${creds!.email}，后台轮询运行中（自动处理会议邀请）。`,
+            `当前绑定邮箱: ${savedCreds?.email ?? "未知"}，后台轮询运行中（自动处理会议邀请）。`,
             "用户可以直接说「帮我约某某开会」来发起会议协商，",
-            "或说「有没有新的会议邀请」来手动检查待办任务。",
+            "或说「有没有新的会议邀请」来手动检查待办任务，",
+            "或说「查看我的会议」来查看所有参与的会议列表和详情。",
             "会议在对话中用标题称呼（如「项目讨论会」），不需要让用户记 ID。",
             "",
             "注意：后台轮询会自动读取日历并提交空闲时间，无需每次通知用户。",

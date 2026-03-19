@@ -10,6 +10,8 @@ import type {
   BindAuthResponse,
   InitiateMeetingRequest,
   InitiateMeetingResponse,
+  MeetingListResponse,
+  MeetingDetailResponse,
   PendingTasksResponse,
   SubmitAvailabilityRequest,
   SubmitAvailabilityResponse,
@@ -90,6 +92,28 @@ export class ClawSyncApiClient {
       "POST",
       "/api/meetings",
       data,
+    );
+    return res.data!;
+  }
+
+  // ============================================================
+  // API 3: GET /api/meetings — 我的会议列表
+  // ============================================================
+  async getMeetingList(): Promise<MeetingListResponse> {
+    const res = await this.request<MeetingListResponse>(
+      "GET",
+      "/api/meetings",
+    );
+    return res.data!;
+  }
+
+  // ============================================================
+  // API 4: GET /api/meetings/{meeting_id} — 查询会议详情
+  // ============================================================
+  async getMeetingDetail(meetingId: string): Promise<MeetingDetailResponse> {
+    const res = await this.request<MeetingDetailResponse>(
+      "GET",
+      `/api/meetings/${meetingId}`,
     );
     return res.data!;
   }
