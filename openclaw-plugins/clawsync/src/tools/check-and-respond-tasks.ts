@@ -2,20 +2,18 @@
 // Tool 3: CheckAndRespondTaskTool (check_and_respond_tasks)
 // 对应 API 6 + API 5:
 //   GET  /api/tasks/pending          — 拉取待办任务
-//   POST /api/meetings/{id}/submit   — 提交空闲时间
+//   POST /api/meetings/{id}/submit   — 提交响应
 //
 // 核心工作流:
 //   轮询拉取任务 → 根据 task_type 分发处理:
-//   INITIAL_SUBMIT     → Agent 读取日历，组装时间段，调用本 Tool 提交
-//   COUNTER_PROPOSAL   → Agent 展示协调方建议，等用户决策后调用本 Tool 提交
-//   MEETING_CONFIRMED  → 通知用户会议已确认
-//   MEETING_FAILED     → 通知用户协商失败
+//   INITIAL_SUBMIT     → 自动提交空闲时间（后台静默完成）
+//   COUNTER_PROPOSAL   → 通知用户，等用户决策后通过此 Tool 提交
 //
 // Agent 使用本 Tool 的两种模式:
 //   模式 A: 无参数调用 → 拉取待办任务列表
-//   模式 B: 带参数调用 → 对特定会议提交响应
+//   模式 B: 带参数调用 → 对特定会议提交响应（4种 response_type）
 //
-// 格式严格对齐 API_REFERENCE.md v1.0.0
+// 格式严格对齐服务端 schemas.py ResponseType 枚举
 // ============================================================
 
 import type { ClawSyncApiClient } from "../utils/api-client.js";
@@ -24,11 +22,7 @@ import type {
   ResponseType,
   TimeSlot,
 } from "../types/index.js";
-import {
-  getMockAvailableSlots,
-  getMockUserPreferences,
-  formatPreferencesForAgent,
-} from "../utils/mock-calendar.js";
+
 
 /** Tool 的 JSON Schema 定义 */
 export const checkAndRespondTasksSchema = {
@@ -37,16 +31,24 @@ export const checkAndRespondTasksSchema = {
     "检查并响应待办的会议协商任务。",
     "",
     "模式 A - 查看待办（无参数调用）：",
-    "  拉取服务端待办任务列表，返回每个任务的详情、用户日历空闲时段和偏好。",
-    "  Agent 应根据返回信息决定下一步操作。",
+    "  拉取服务端待办任务列表，返回每个任务的详情。你需要结合对用户的记忆和日历来处理。",
     "",
     "模式 B - 提交响应（带参数调用）：",
-    "  对特定会议提交空闲时间。需要提供 meeting_id、response_type 和 available_slots。",
+    "  对特定会议提交响应。必须提供 meeting_id 和 response_type。",
+    "",
+    "response_type 说明：",
+    "  INITIAL          — 首次提交空闲时间（需要 available_slots）",
+    "  NEW_PROPOSAL     — 协商中重新提交时间（需要 available_slots）",
+    "  ACCEPT_PROPOSAL  — 接受协调方的妥协建议（不需要 available_slots）",
+    "  REJECT           — 拒绝方案，会议终止（不需要 available_slots）",
     "",
     "工作流程：",
-    "  1. 先无参数调用，获取待办任务和用户日历数据",
-    "  2. 对 INITIAL_SUBMIT 任务：根据日历数据组装时间段，带参数调用提交",
-    "  3. 对 COUNTER_PROPOSAL 任务：展示协调方建议给用户，等用户决定后带参数调用提交",
+    "  1. 收到 INITIAL_SUBMIT 时，根据你对用户的记忆和日历选择空闲时间提交",
+    "  2. 收到 [ClawSync 协商通知] 时，协调方的妥协建议已推送给你",
+    "  3. 将建议内容告知用户，等用户决定：",
+    "     - 用户同意 → 调用本工具，response_type='ACCEPT_PROPOSAL'",
+    "     - 用户想改时间 → 调用本工具，response_type='NEW_PROPOSAL' + available_slots",
+    "     - 用户拒绝 → 调用本工具，response_type='REJECT'",
   ].join("\n"),
   parameters: {
     type: "object" as const,
@@ -54,15 +56,17 @@ export const checkAndRespondTasksSchema = {
       meeting_id: {
         type: "string" as const,
         description:
-          "要响应的会议 ID（可选）。不提供则仅拉取任务列表。",
+          "要响应的会议 ID。不提供则仅拉取任务列表。",
       },
       response_type: {
         type: "string" as const,
-        enum: ["INITIAL", "COUNTER"],
+        enum: ["INITIAL", "NEW_PROPOSAL", "ACCEPT_PROPOSAL", "REJECT"],
         description: [
-          "响应类型（当提供 meeting_id 时必填）：",
+          "响应类型（提供 meeting_id 时必填）：",
           "INITIAL - 首次提交空闲时间；",
-          "COUNTER - 协商轮次中重新提交时间。",
+          "NEW_PROPOSAL - 协商中重新提交时间；",
+          "ACCEPT_PROPOSAL - 接受协调方建议；",
+          "REJECT - 拒绝方案，会议终止。",
         ].join(" "),
       },
       available_slots: {
@@ -82,11 +86,11 @@ export const checkAndRespondTasksSchema = {
           required: ["start", "end"],
         },
         description:
-          "可用时间段列表。Agent 传入 {start, end} 对象，工具内部会转为服务端要求的字符串格式。",
+          "可用时间段列表（INITIAL 和 NEW_PROPOSAL 时必填）。Agent 传入 {start, end} 对象，工具内部会转为服务端要求的字符串格式。",
       },
       preference_note: {
         type: "string" as const,
-        description: "用户的偏好说明或对妥协方案的回复（可选）",
+        description: "用户的偏好说明或备注（可选）",
       },
     },
     required: [],
@@ -95,9 +99,6 @@ export const checkAndRespondTasksSchema = {
 
 // ---- 内部: 构建 INITIAL_SUBMIT 任务的返回信息 ----
 function buildInitialSubmitInfo(task: PendingTask): object {
-  const slots = getMockAvailableSlots();
-  const prefs = getMockUserPreferences();
-
   return {
     meeting_id: task.meeting_id,
     title: task.title,
@@ -107,69 +108,36 @@ function buildInitialSubmitInfo(task: PendingTask): object {
     duration_minutes: task.duration_minutes ?? null,
     round_count: task.round_count ?? 0,
     server_message: task.message,
-    calendar_available_slots: slots,
-    user_preferences: formatPreferencesForAgent(prefs),
     instruction: [
       "收到会议邀请，需要提交空闲时间。",
-      "上面的 calendar_available_slots 是用户日历中的可用时段，",
-      "user_preferences 是用户的开会偏好。",
-      "请根据这些信息，再次调用本工具并传入：",
-      "meeting_id、response_type 设为 'INITIAL'、",
-      "以及从日历数据中选择合适的 available_slots。",
+      "请根据你对用户的记忆（开会偏好、习惯等）和用户的日历，",
+      "选择合适的空闲时间段，然后调用本工具提交：",
+      "meeting_id、response_type='INITIAL'、available_slots。",
+      "如果你不清楚用户的空闲时间，请直接询问用户。",
     ].join(""),
   };
 }
 
 // ---- 内部: 构建 COUNTER_PROPOSAL 任务的返回信息 ----
 function buildCounterProposalInfo(task: PendingTask): object {
-  const slots = getMockAvailableSlots();
-  const prefs = getMockUserPreferences();
-
   return {
     meeting_id: task.meeting_id,
     title: task.title,
-    action: "NEEDS_AGENT_ACTION",
+    action: "NEEDS_USER_DECISION",
     task_type: "COUNTER_PROPOSAL",
     initiator: task.initiator,
     duration_minutes: task.duration_minutes ?? null,
     round_count: task.round_count ?? 0,
     coordinator_message: task.message,
-    calendar_available_slots: slots,
-    user_preferences: formatPreferencesForAgent(prefs),
     instruction: [
-      "协调方发来了新的协商建议。",
-      "如果是用户主动查询待办，展示 coordinator_message 和日历空闲时段供参考，等用户决定后提交。",
-      "如果是后台自动处理，直接根据日历数据选择合适时间段提交即可，无需通知用户。",
-      "调用本工具传入：meeting_id、response_type 设为 'COUNTER'、以及 available_slots。",
-    ].join(""),
-  };
-}
-
-// ---- 内部: 构建 MEETING_CONFIRMED 通知 ----
-function buildConfirmedInfo(task: PendingTask): object {
-  return {
-    meeting_id: task.meeting_id,
-    title: task.title,
-    action: "NOTIFY_USER",
-    task_type: "MEETING_CONFIRMED",
-    initiator: task.initiator,
-    duration_minutes: task.duration_minutes ?? null,
-    message: task.message,
-    instruction: "会议已确认，请将确认信息通知用户。",
-  };
-}
-
-// ---- 内部: 构建 MEETING_FAILED 通知 ----
-function buildFailedInfo(task: PendingTask): object {
-  return {
-    meeting_id: task.meeting_id,
-    title: task.title,
-    action: "NOTIFY_USER",
-    task_type: "MEETING_FAILED",
-    initiator: task.initiator,
-    duration_minutes: task.duration_minutes ?? null,
-    message: task.message,
-    instruction: "会议协商失败，请将失败信息通知用户。",
+      "协调方发来了协商建议，需要用户决策。",
+      "请将 coordinator_message 内容告知用户，",
+      "结合你对用户的记忆（开会偏好）和用户日历情况供参考。",
+      "然后等用户决定：",
+      "  - 用户同意建议 → 调用本工具，meeting_id + response_type='ACCEPT_PROPOSAL'",
+      "  - 用户想改时间 → 调用本工具，meeting_id + response_type='NEW_PROPOSAL' + available_slots",
+      "  - 用户拒绝 → 调用本工具，meeting_id + response_type='REJECT'",
+    ].join("\n"),
   };
 }
 
@@ -197,10 +165,17 @@ export function createCheckAndRespondTasksHandler(
     // =============================================
     // 模式 B: 提交对特定会议的响应
     // =============================================
-    if (meeting_id && response_type && available_slots?.length) {
-      // 服务端 API 5 实际要求字符串数组 "2026-03-18 14:00-16:00"
-      // Agent 传入的是 {start, end} 对象，这里做格式转换
-      const slotsAsStrings = available_slots.map((slot) => {
+    if (meeting_id && response_type) {
+      // ACCEPT_PROPOSAL 和 REJECT 不需要 available_slots
+      if ((response_type === "INITIAL" || response_type === "NEW_PROPOSAL") && !available_slots?.length) {
+        return {
+          success: false,
+          message: `response_type='${response_type}' 需要提供 available_slots。`,
+        };
+      }
+
+      // 将 {start, end} 对象转为服务端要求的字符串格式
+      const slotsAsStrings = (available_slots ?? []).map((slot) => {
         if (typeof slot === "string") return slot;
         const startDate = slot.start.split(" ")[0] ?? "";
         const startTime = slot.start.split(" ")[1] ?? slot.start;
@@ -223,10 +198,13 @@ export function createCheckAndRespondTasksHandler(
           success: true,
           meeting_id,
           response_type,
-          message: `响应已提交。`,
+          message: response_type === "ACCEPT_PROPOSAL"
+            ? "已接受协调方建议。"
+            : response_type === "REJECT"
+              ? "已拒绝方案，会议协商终止。"
+              : "响应已提交。",
           status: result.status,
           all_submitted: result.all_submitted,
-          coordinator_result: result.coordinator_result ?? null,
         };
       } catch (error: unknown) {
         const errMsg = error instanceof Error ? error.message : String(error);
@@ -262,17 +240,9 @@ export function createCheckAndRespondTasksHandler(
           case "COUNTER_PROPOSAL":
             results.push(buildCounterProposalInfo(task));
             break;
-          case "MEETING_CONFIRMED":
-            results.push(buildConfirmedInfo(task));
-            break;
-          case "MEETING_FAILED":
-            results.push(buildFailedInfo(task));
-            break;
           default:
-            // 未知类型，日志 + 兜底通知
             console.log(
-              `[ClawSync] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}, raw=`,
-              JSON.stringify(task),
+              `[ClawSync] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}`,
             );
             results.push({
               meeting_id: task.meeting_id,

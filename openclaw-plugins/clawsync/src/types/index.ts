@@ -51,8 +51,14 @@ export interface TimeSlot {
   end: string;    // "2026-03-18 16:00"
 }
 
-/** 提交类型: INITIAL(首次) / COUNTER(协商轮次) */
-export type ResponseType = "INITIAL" | "COUNTER";
+/**
+ * 提交类型（对齐服务端 ResponseType 枚举）：
+ *   INITIAL          — 首次提交空闲时间
+ *   NEW_PROPOSAL     — 协商轮次中重新提交时间（替代旧的 COUNTER）
+ *   ACCEPT_PROPOSAL  — 接受协调方的妥协建议
+ *   REJECT           — 拒绝方案，会议直接失败
+ */
+export type ResponseType = "INITIAL" | "NEW_PROPOSAL" | "ACCEPT_PROPOSAL" | "REJECT";
 
 export interface SubmitAvailabilityRequest {
   response_type: ResponseType;

@@ -94,6 +94,27 @@ export function loadNotifiedMeetings(): string[] {
 
 
 
+// ---- 等待用户决策的会议（COUNTER_PROPOSAL 通知后等用户回复）----
+
+const PENDING_DECISIONS_FILE_NAME = "pending-decisions.json";
+
+export function savePendingDecisions(meetingIds: string[]): void {
+  ensureDir();
+  const filePath = join(STORAGE_DIR, PENDING_DECISIONS_FILE_NAME);
+  writeFileSync(filePath, JSON.stringify(meetingIds), "utf-8");
+}
+
+export function loadPendingDecisions(): string[] {
+  const filePath = join(STORAGE_DIR, PENDING_DECISIONS_FILE_NAME);
+  if (!existsSync(filePath)) return [];
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    return JSON.parse(raw) as string[];
+  } catch {
+    return [];
+  }
+}
+
 // ---- Session 上下文 ----
 // 记录用户绑定时的 session，确保轮询推送回到同一个对话窗口
 
