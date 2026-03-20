@@ -17,6 +17,7 @@ from .scoring import score_meeting
 def handle_meeting(
     role_inputs: list[tuple[str, "str | list[dict]"]],
     meeting_id: str,
+    reference_date: str | None = None,
 ) -> dict:
     """
     收集会议所有参与者的时间描述，格式化存储后进行打分。
@@ -58,6 +59,7 @@ def handle_meeting(
             user_input=user_input,
             user_id=user_id,
             meeting_id=meeting_id,
+            reference_date=reference_date,
         )
 
     # ── 第二阶段：汇总打分 ────────────────────────────────────────────────────
@@ -70,6 +72,7 @@ def handle_meeting(
 def coordinate_meeting(
     role_inputs: list[tuple[str, "str | list[dict]"]],
     meeting_id: str,
+    reference_date: str | None = None,
 ) -> dict:
     """
     一站式会议时间协调：收集用户时间 → 打分 → LLM 推荐。
@@ -97,7 +100,7 @@ def coordinate_meeting(
             "suggestions": ["建议扩大可用时间范围"]
         }
     """
-    handle_meeting(role_inputs=role_inputs, meeting_id=meeting_id)
+    handle_meeting(role_inputs=role_inputs, meeting_id=meeting_id, reference_date=reference_date)
     print(f"\n  → 正在分析 {meeting_id} 推荐时间...")
     return summarize_meeting(meeting_id)
 
@@ -159,25 +162,64 @@ def coordinate_from_task(task: dict) -> dict:
 
     initiator_id = str(initiators[0]["user_id"])
 
+    # ── 从 latest_slots 中提取真实日期（取第一个有效的日期）────────────────────
+    meeting_date: str | None = None
+    for p in participants_data:
+        for slot in (p.get("latest_slots") or []):
+            start_str = str(slot.get("start", ""))
+            if " " in start_str:
+                meeting_date = start_str.split(" ")[0]  # "2026-03-21"
+                break
+        if meeting_date:
+            break
+
     # ── 收集每位参与者的时间输入 ──────────────────────────────────────────────
+    import re
+    _SLOT_FMT = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")  # YYYY-MM-DD HH:MM
+
     role_inputs: list[tuple[str, "str | list[dict]"]] = []
     for p in participants_data:
         user_id = str(p["user_id"])
+        email = p.get("email", user_id)
         slots: list[dict] = p.get("latest_slots") or []
         note: str = (p.get("preference_note") or "").strip()
 
         if slots:
-            role_inputs.append((user_id, slots))
+            # 校验 latest_slots 格式
+            valid = True
+            for i, slot in enumerate(slots):
+                if not isinstance(slot, dict):
+                    print(f"  [ERROR] [{email}] latest_slots[{i}] 不是 dict：{slot}")
+                    valid = False
+                    continue
+                start_val = slot.get("start")
+                end_val = slot.get("end")
+                if start_val is None or end_val is None:
+                    print(f"  [ERROR] [{email}] latest_slots[{i}] 缺少 start/end 字段：{slot}")
+                    valid = False
+                elif not _SLOT_FMT.match(str(start_val)) or not _SLOT_FMT.match(str(end_val)):
+                    print(
+                        f"  [ERROR] [{email}] latest_slots[{i}] 格式错误，"
+                        f"应为 'YYYY-MM-DD HH:MM'，"
+                        f"实际 start={start_val!r}, end={end_val!r}"
+                    )
+                    valid = False
+
+            if valid:
+                role_inputs.append((user_id, slots))
+            else:
+                print(f"  [WARN]  [{email}] latest_slots 校验失败，跳过该参与者")
         elif note:
             role_inputs.append((user_id, note))
         else:
-            print(f"  ⚠ [{user_id}] 无时间数据，跳过")
+            print(f"  [WARN]  [{email}] 无时间数据（latest_slots 和 preference_note 均为空），跳过")
 
-    handle_meeting(role_inputs=role_inputs, meeting_id=meeting_id)
+    handle_meeting(role_inputs=role_inputs, meeting_id=meeting_id, reference_date=meeting_date)
     print(f"\n  → 正在分析 {meeting_id} 推荐时间（时长 {duration_minutes} 分钟，优先对齐发起人）...")
     return summarize_meeting(
         meeting_id=meeting_id,
         duration_minutes=duration_minutes,
         initiator_id=initiator_id,
         participants_info=participants_data,
+        meeting_date=meeting_date,
     )

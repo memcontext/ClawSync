@@ -5,16 +5,19 @@ user_time_format / submit_user_time API
   1. 标准 API 格式：available_slots 列表，每项含 start/end（YYYY-MM-DD HH:MM）
   2. 自然语言：由 LLM Agent 解析
 
+时间槽 key 格式：YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM（双横线分隔）
+只存储用户实际提到的时间槽（True / False），不再填充固定 36 个槽。
+
 每个 meeting_id 对应 meeting_time_data/{meeting_id}.json，同一会议的多个用户共享同一文件。
 
 公开接口：
-    user_time_format(user_input, user_id, meeting_id) -> dict   # 仅自然语言
-    submit_user_time(user_input, user_id, meeting_id) -> dict   # 自动识别格式
+    user_time_format(user_input, user_id, meeting_id, reference_date) -> dict
+    submit_user_time(user_input, user_id, meeting_id, reference_date) -> dict
 """
 
 import json
-import os
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from langchain_openai import ChatOpenAI
@@ -22,12 +25,18 @@ from langchain_core.prompts import ChatPromptTemplate
 from typing import Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
-from ..config import LLM_MODEL, LLM_API_KEY, LLM_BASE_URL, LLM_TEMPERATURE
+from config import DOUBAO_API_KEY, DOUBAO_BASE_URL, DOUBAO_MODEL, LLM_TEMPERATURE
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
-# 所有会议 JSON 文件统一存放于项目根目录的 meeting_time_data 文件夹
 DATA_DIR = Path(__file__).resolve().parent.parent / "meeting_time_data"
+
+# 日期感知 slot key 正则：YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM
+_DATED_SLOT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}--\d{4}-\d{2}-\d{2} \d{2}:\d{2}$"
+)
+
+# 旧格式兼容（LLM 输出用）：HH:MM-HH:MM
 _SLOT_RE = re.compile(r"^\d{2}:\d{2}-\d{2}:\d{2}$")
 
 
@@ -38,7 +47,7 @@ def _meeting_file(meeting_id: str) -> Path:
 
 
 def _gen_slots() -> list[str]:
-    """生成 06:00–00:00（次日）每 30 分钟一个时间段。"""
+    """生成 06:00–00:00（次日）每 30 分钟一个时间段（HH:MM-HH:MM 格式，仅 LLM 参考用）。"""
     slots = []
     for h in range(6, 24):
         for m in (0, 30):
@@ -48,19 +57,16 @@ def _gen_slots() -> list[str]:
     return slots
 
 
+# LLM 自然语言解析时使用的参考时间段列表
 TIME_SLOTS: list[str] = _gen_slots()
 
 # ─── Pydantic 模型 ────────────────────────────────────────────────────────────
 
-# 时间槽的三态值类型：有空 / 没空 / 未提及
 SlotValue = Union[bool, Literal["other"]]
 
 
 class AvailabilityOutput(BaseModel):
-    """
-    LLM 输出结构：纯时间槽映射。
-    由 with_structured_output 填充，经过两层 Pydantic 校验后方可使用。
-    """
+    """LLM 输出结构：HH:MM-HH:MM → True/False/"other" 映射（自然语言解析用）。"""
 
     slots: dict[str, SlotValue] = Field(
         description=(
@@ -76,7 +82,6 @@ class AvailabilityOutput(BaseModel):
     @field_validator("slots")
     @classmethod
     def check_key_format(cls, v: dict[str, SlotValue]) -> dict[str, SlotValue]:
-        """每个 key 必须匹配 HH:MM-HH:MM 格式；value 只能是 true/false/'other'。"""
         bad_keys = [k for k in v if not _SLOT_RE.match(k)]
         if bad_keys:
             raise ValueError(f"时间段 key 格式错误（应为 HH:MM-HH:MM）：{bad_keys}")
@@ -87,7 +92,6 @@ class AvailabilityOutput(BaseModel):
 
     @model_validator(mode="after")
     def check_all_slots_present(self) -> "AvailabilityOutput":
-        """所有预定义时间段必须全部出现，不允许遗漏。"""
         missing = [s for s in TIME_SLOTS if s not in self.slots]
         if missing:
             raise ValueError(
@@ -102,16 +106,8 @@ class RoleEntry(BaseModel):
     单个用户在某次会议中的完整条目。
 
     固定元数据字段：user_ID、meeting_ID
-    动态时间槽字段：以 extra="allow" 方式附加，key 格式为 HH:MM-HH:MM
-
-    序列化示例：
-    {
-        "user_ID": "user_001",
-        "meeting_ID": "meeting_12345",
-        "18:00-18:30": true,
-        "18:30-19:00": true,
-        ...
-    }
+    动态时间槽字段：以 extra="allow" 方式附加
+      key 格式为 YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM
     """
 
     model_config = ConfigDict(extra="allow")
@@ -121,33 +117,24 @@ class RoleEntry(BaseModel):
 
     @model_validator(mode="after")
     def check_extra_keys(self) -> "RoleEntry":
-        """额外字段只能是合法的时间槽 key。"""
-        bad = [k for k in (self.model_extra or {}) if not _SLOT_RE.match(k)]
+        bad = [
+            k for k in (self.model_extra or {})
+            if not _DATED_SLOT_RE.match(k)
+        ]
         if bad:
-            raise ValueError(f"RoleEntry 中存在非法 key：{bad}")
+            raise ValueError(f"RoleEntry 中存在非法 key（应为 YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM）：{bad}")
         return self
 
     def get_slots(self) -> dict[str, SlotValue]:
-        """返回时间槽部分（排除元数据字段）。"""
         return dict(self.model_extra or {})
 
 
 class AvailabilityStore(RootModel[dict[str, RoleEntry]]):
-    """
-    单个会议 JSON 文件的完整存储结构。
-    外层 key 为用户标识（如 "user_001"），value 为该用户的 RoleEntry。
-
-    对应文件：meeting_time_data/{meeting_id}.json
-    {
-        "user_001": { "user_ID": "user_001", "meeting_ID": "m1", "18:00-18:30": true, ... },
-        "user_002": { "user_ID": "user_002", "meeting_ID": "m1", "09:00-09:30": true, ... }
-    }
-    """
+    """单个会议 JSON 文件的完整存储结构。"""
 
 # ─── 数据层 ───────────────────────────────────────────────────────────────────
 
 def _load_store(meeting_id: str) -> AvailabilityStore:
-    """加载指定会议的 JSON 文件；文件不存在则返回空 store。"""
     path = _meeting_file(meeting_id)
     if path.exists():
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -156,24 +143,64 @@ def _load_store(meeting_id: str) -> AvailabilityStore:
 
 
 def _save_store(store: AvailabilityStore, meeting_id: str) -> None:
-    """将 store 写入对应会议的 JSON 文件。"""
     path = _meeting_file(meeting_id)
     path.write_text(
         json.dumps(store.model_dump(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-# ─── LangChain 链 ─────────────────────────────────────────────────────────────
+# ─── 标准 API 格式解析 ────────────────────────────────────────────────────────
+
+_STANDARD_SLOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+
+
+def _is_standard_slots(user_input: object) -> bool:
+    """判断是否为标准 API 格式：list[dict] 且每项含 start/end（YYYY-MM-DD HH:MM）。"""
+    if not isinstance(user_input, list) or len(user_input) == 0:
+        return False
+    first = user_input[0]
+    return (
+        isinstance(first, dict)
+        and "start" in first
+        and "end" in first
+        and _STANDARD_SLOT_RE.match(str(first.get("start", "")))
+    )
+
+
+def _parse_standard_slots(available_slots: list[dict]) -> dict[str, bool]:
+    """
+    将标准 API 格式的时间段列表转换为日期感知的 30 分钟时间槽。
+    只生成 True 的槽（用户有空的时间）。
+
+    Args:
+        available_slots: [{"start": "2026-03-21 10:00", "end": "2026-03-21 12:00"}, ...]
+
+    Returns:
+        {"2026-03-21 10:00--2026-03-21 10:30": True, "2026-03-21 10:30--2026-03-21 11:00": True, ...}
+    """
+    result: dict[str, bool] = {}
+
+    for item in available_slots:
+        start = datetime.strptime(str(item["start"]), "%Y-%m-%d %H:%M")
+        end = datetime.strptime(str(item["end"]), "%Y-%m-%d %H:%M")
+
+        current = start
+        while current + timedelta(minutes=30) <= end:
+            next_time = current + timedelta(minutes=30)
+            key = f"{current.strftime('%Y-%m-%d %H:%M')}--{next_time.strftime('%Y-%m-%d %H:%M')}"
+            result[key] = True
+            current = next_time
+
+    return result
+
+
+# ─── LangChain 链（自然语言解析）──────────────────────────────────────────────
 
 def _build_chain():
-    """
-    构建 LangChain 链：
-      ChatPromptTemplate → ChatAnthropic.with_structured_output(AvailabilityOutput)
-    """
     llm = ChatOpenAI(
-        model=LLM_MODEL,
-        api_key=LLM_API_KEY,
-        base_url=LLM_BASE_URL,
+        model=DOUBAO_MODEL,
+        api_key=DOUBAO_API_KEY,
+        base_url=DOUBAO_BASE_URL,
         temperature=LLM_TEMPERATURE,
     )
     structured_llm = llm.with_structured_output(AvailabilityOutput)
@@ -202,128 +229,61 @@ def _build_chain():
 
     return prompt | structured_llm
 
+
+def _convert_llm_slots_to_dated(
+    llm_slots: dict[str, SlotValue],
+    reference_date: str,
+) -> dict[str, bool]:
+    """
+    将 LLM 输出的 HH:MM-HH:MM 槽转换为日期感知格式。
+    只保留 True 和 False 的槽，丢弃 "other"。
+
+    Args:
+        llm_slots: {"18:00-18:30": True, "18:30-19:00": False, "19:00-19:30": "other", ...}
+        reference_date: "2026-03-21"
+
+    Returns:
+        {"2026-03-21 18:00--2026-03-21 18:30": True, "2026-03-21 18:30--2026-03-21 19:00": False, ...}
+    """
+    result: dict[str, bool] = {}
+    for slot_key, val in llm_slots.items():
+        if val == "other":
+            continue
+        parts = slot_key.split("-")
+        start_hm = parts[0]
+        end_hm = parts[1]
+        key = f"{reference_date} {start_hm}--{reference_date} {end_hm}"
+        result[key] = val
+    return result
+
+
 # ─── 公开 API ─────────────────────────────────────────────────────────────────
 
-def user_time_format(user_input: str, user_id: str, meeting_id: str) -> dict:
+def user_time_format(
+    user_input: str,
+    user_id: str,
+    meeting_id: str,
+    reference_date: str | None = None,
+) -> dict:
     """
     将用户自然语言时间描述转换为结构化可用性数据并持久化。
 
     Args:
-        user_input:  用户的自然语言时间描述，例如"我今晚 6 点到 7 点半有空"
-        user_id:     用户唯一标识，作为 JSON 顶层 key 及 user_ID 字段的值
-        meeting_id:  会议唯一编号，写入 meeting_ID 字段
+        user_input:     自然语言时间描述
+        user_id:        用户唯一标识
+        meeting_id:     会议唯一编号
+        reference_date: 参考日期 "YYYY-MM-DD"，用于生成日期感知的 slot key
 
     Returns:
-        该用户的完整条目（dict），格式如下：
-        {
-            "user_ID": "user_001",
-            "meeting_ID": "meeting_12345",
-            "06:00-06:30": false,
-            ...
-            "18:00-18:30": true,
-            "18:30-19:00": true,
-            "19:00-19:30": true,
-            ...
-        }
-
-    Raises:
-        pydantic.ValidationError: LLM 输出不符合 schema 时抛出
+        该用户的完整条目 dict
     """
-    # 1. LLM 解析 → AvailabilityOutput（经 Pydantic 校验）
     output: AvailabilityOutput = _build_chain().invoke({"user_input": user_input})
 
-    # 2. 组装 RoleEntry（user_ID + meeting_ID + 时间槽）
-    entry = RoleEntry(user_ID=user_id, meeting_ID=meeting_id, **output.slots)
-
-    # 3. 加载该会议的 store，写入 / 覆盖该用户条目，保存
-    store = _load_store(meeting_id)
-    store.root[user_id] = entry
-    _save_store(store, meeting_id)
-
-    return entry.model_dump()
-
-# ─── 标准 API 格式解析 ────────────────────────────────────────────────────────
-
-_STANDARD_SLOT_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$"
-)
-
-
-def _is_standard_slots(user_input: object) -> bool:
-    """判断是否为标准 API 格式：list[dict] 且每项含 start/end（YYYY-MM-DD HH:MM）。"""
-    if not isinstance(user_input, list) or len(user_input) == 0:
-        return False
-    first = user_input[0]
-    return (
-        isinstance(first, dict)
-        and "start" in first
-        and "end" in first
-        and _STANDARD_SLOT_RE.match(str(first.get("start", "")))
-    )
-
-
-def _parse_standard_slots(
-    available_slots: list[dict],
-) -> dict[str, SlotValue]:
-    """
-    将标准 API 格式的时间段列表转换为时间槽映射。
-
-    只取 HH:MM 部分（暂时忽略日期，后续再改）。
-    完全包含在某个可用区间内的时间槽 → True，其余 → "other"。
-
-    Args:
-        available_slots: [{"start": "YYYY-MM-DD HH:MM", "end": "YYYY-MM-DD HH:MM"}, ...]
-    """
-    result: dict[str, SlotValue] = {slot: "other" for slot in TIME_SLOTS}
-
-    # 将每个区间转换为分钟数（仅 HH:MM 部分）
-    ranges: list[tuple[int, int]] = []
-    for item in available_slots:
-        start_hm = str(item["start"]).split(" ")[-1]  # "HH:MM"
-        end_hm   = str(item["end"]).split(" ")[-1]
-        sh, sm = map(int, start_hm.split(":"))
-        eh, em = map(int, end_hm.split(":"))
-        ranges.append((sh * 60 + sm, eh * 60 + em))
-
-    for slot in TIME_SLOTS:
-        slot_start_str, slot_end_str = slot.split("-")
-        ss_h, ss_m = map(int, slot_start_str.split(":"))
-        slot_start_mins = ss_h * 60 + ss_m
-        slot_end_mins   = slot_start_mins + 30
-
-        for (range_start, range_end) in ranges:
-            if slot_start_mins >= range_start and slot_end_mins <= range_end:
-                result[slot] = True
-                break
-
-    return result
-
-
-def submit_user_time(
-    user_input: "str | list[dict]",
-    user_id: str,
-    meeting_id: str,
-) -> dict:
-    """
-    统一入口：自动识别输入格式并存储用户时间数据。
-
-    Args:
-        user_input: 两种格式之一
-            - list[dict]：标准 API 格式，每项含 start/end（YYYY-MM-DD HH:MM）
-            - str：自然语言描述，由 LLM 解析
-        user_id:    用户唯一标识
-        meeting_id: 会议唯一编号
-
-    Returns:
-        该用户的完整条目 dict（同 user_time_format）
-    """
-    if _is_standard_slots(user_input):
-        slots = _parse_standard_slots(user_input)  # type: ignore[arg-type]
+    if reference_date:
+        slots = _convert_llm_slots_to_dated(output.slots, reference_date)
     else:
-        output: AvailabilityOutput = _build_chain().invoke(
-            {"user_input": str(user_input)}
-        )
-        slots = output.slots
+        # 无日期上下文，只保留 True/False 的旧格式 key（兜底）
+        slots = {k: v for k, v in output.slots.items() if v != "other"}
 
     entry = RoleEntry(user_ID=user_id, meeting_ID=meeting_id, **slots)
     store = _load_store(meeting_id)
@@ -332,47 +292,37 @@ def submit_user_time(
     return entry.model_dump()
 
 
-# ─── 命令行演示入口 ────────────────────────────────────────────────────────────
+def submit_user_time(
+    user_input: "str | list[dict]",
+    user_id: str,
+    meeting_id: str,
+    reference_date: str | None = None,
+) -> dict:
+    """
+    统一入口：自动识别输入格式并存储用户时间数据。
 
-def main():
-    print("=" * 55)
-    print("  user_time_format  CLI 演示")
-    print("=" * 55)
-    print("示例输入：我在今晚 6:00 到 7:30 有空，其他时间没空")
-    print("输入 quit 退出\n")
+    Args:
+        user_input:     list[dict] 标准 API 格式 或 str 自然语言
+        user_id:        用户唯一标识
+        meeting_id:     会议唯一编号
+        reference_date: 参考日期（自然语言解析时用）
 
-    default_user_id    = "user_001"
-    default_meeting_id = "meeting_12345"
+    Returns:
+        该用户的完整条目 dict
+    """
+    if _is_standard_slots(user_input):
+        slots = _parse_standard_slots(user_input)  # type: ignore[arg-type]
+    else:
+        output: AvailabilityOutput = _build_chain().invoke(
+            {"user_input": str(user_input)}
+        )
+        if reference_date:
+            slots = _convert_llm_slots_to_dated(output.slots, reference_date)
+        else:
+            slots = {k: v for k, v in output.slots.items() if v != "other"}
 
-    while True:
-        try:
-            user_input = input("请输入时间描述：").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n再见！")
-            break
-
-        if not user_input:
-            continue
-        if user_input.lower() in ("quit", "exit", "退出", "q"):
-            print("再见！")
-            break
-
-        try:
-            result = user_time_format(user_input, default_user_id, default_meeting_id)
-
-            free = [k for k in TIME_SLOTS if result.get(k)]
-            print(f"\n📅 [{result['user_ID']} / {result['meeting_ID']}] 有空时间段：")
-            if free:
-                for s in free:
-                    print(f"  ✓ {s}")
-            else:
-                print("  （暂无有空时间段）")
-            saved_path = _meeting_file(default_meeting_id)
-            print(f"✅ 已保存至 {saved_path}\n")
-
-        except Exception as e:
-            print(f"❌ 出错：{e}\n")
-
-
-if __name__ == "__main__":
-    main()
+    entry = RoleEntry(user_ID=user_id, meeting_ID=meeting_id, **slots)
+    store = _load_store(meeting_id)
+    store.root[user_id] = entry
+    _save_store(store, meeting_id)
+    return entry.model_dump()
