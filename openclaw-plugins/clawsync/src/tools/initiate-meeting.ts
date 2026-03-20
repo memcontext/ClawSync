@@ -56,7 +56,7 @@ export const initiateMeetingSchema = {
       preference_note: {
         type: "string" as const,
         description:
-          "发起人的偏好说明（可选）。请根据你对用户的记忆自动填写，例如用户不喜欢早会、周五下午不开会等。也可包含用户本次额外说明的偏好。",
+          "发起人的偏好说明（可选）。仅当你的记忆中确实存在用户的开会偏好时才填写，例如用户说过不喜欢早会、周五下午不开会等。没有相关记忆就不要填，绝对不要编造。也可包含用户本次额外说明的偏好。",
       },
     },
     required: ["title", "duration_minutes", "invitees", "available_slots"],

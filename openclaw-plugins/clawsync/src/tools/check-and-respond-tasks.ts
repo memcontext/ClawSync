@@ -110,9 +110,10 @@ function buildInitialSubmitInfo(task: PendingTask): object {
     server_message: task.message,
     instruction: [
       "收到会议邀请，需要提交空闲时间。",
-      "请根据你对用户的记忆（开会偏好、习惯等）和用户的日历，",
-      "选择合适的空闲时间段，然后调用本工具提交：",
-      "meeting_id、response_type='INITIAL'、available_slots。",
+      "请根据你对用户的记忆和用户的日历，选择合适的空闲时间段。",
+      "记忆中不仅有开会偏好和习惯，还可能有用户提到过的日程安排",
+      "（如出差、看病、接送孩子、约饭等），这些未必在日历上，请一并考虑避开。",
+      "然后调用本工具提交：meeting_id、response_type='INITIAL'、available_slots。",
       "如果你不清楚用户的空闲时间，请直接询问用户。",
     ].join(""),
   };
@@ -132,7 +133,7 @@ function buildCounterProposalInfo(task: PendingTask): object {
     instruction: [
       "协调方发来了协商建议，需要用户决策。",
       "请将 coordinator_message 内容告知用户，",
-      "结合你对用户的记忆（开会偏好）和用户日历情况供参考。",
+      "结合你对用户的记忆（偏好习惯及用户提到过的日程安排）和用户日历情况供参考。",
       "然后等用户决定：",
       "  - 用户同意建议 → 调用本工具，meeting_id + response_type='ACCEPT_PROPOSAL'",
       "  - 用户想改时间 → 调用本工具，meeting_id + response_type='NEW_PROPOSAL' + available_slots",
