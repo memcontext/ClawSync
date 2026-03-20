@@ -22,7 +22,7 @@ class StateMachine:
             MeetingState.PENDING: [MeetingState.COLLECTING],
             MeetingState.COLLECTING: [MeetingState.ANALYZING, MeetingState.NEGOTIATING],
             MeetingState.ANALYZING: [MeetingState.CONFIRMED, MeetingState.NEGOTIATING, MeetingState.FAILED],
-            MeetingState.NEGOTIATING: [MeetingState.ANALYZING, MeetingState.FAILED],
+            MeetingState.NEGOTIATING: [MeetingState.COLLECTING, MeetingState.ANALYZING, MeetingState.FAILED],
             MeetingState.CONFIRMED: [],
             MeetingState.FAILED: []
         }

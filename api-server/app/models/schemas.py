@@ -12,6 +12,7 @@ class ResponseType(str, Enum):
     INITIAL = "INITIAL"
     ACCEPT_PROPOSAL = "ACCEPT_PROPOSAL"
     NEW_PROPOSAL = "NEW_PROPOSAL"
+    COUNTER = "COUNTER"             # 插件兼容别名，等同于 NEW_PROPOSAL
     REJECT = "REJECT"
 
 
@@ -55,9 +56,17 @@ class SubmitAvailabilityRequest(BaseModel):
 
 
 class CounterProposalItem(BaseModel):
-    """Coordinator Agent 下发的妥协建议（针对某个参与者）"""
+    """
+    Coordinator Agent 下发的妥协建议（针对某个参与者）
+    {
+        "target_email": "alice@example.com",
+        "message": "Bob只有下午有空，建议您调整到以下时间段",
+        "suggested_slots": ["2026-03-18 17:00-18:00", "2026-03-19 14:00-16:00"]
+    }
+    """
     target_email: str
     message: str
+    suggested_slots: List[str] = []  # Agent 建议的时间槽
 
 
 class DecisionStatus(str, Enum):

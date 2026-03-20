@@ -129,21 +129,28 @@ async def submit_coordination_result(
             meeting.coordinator_reasoning = result.agent_reasoning
             meeting.updated_at = datetime.utcnow()
 
-            # 所有参与者不再需要操作
+            # 给所有参与者生成 CONFIRMED 通知（action_required=True 让 Plugin 轮询能看到）
             logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             for log in logs:
-                log.action_required = False
-                log.counter_proposal_message = None
+                log.action_required = True
+                log.counter_proposal_message = (
+                    f"✅ 会议已确认！\n"
+                    f"会议：{meeting.title}\n"
+                    f"时间：{result.final_time}\n"
+                    f"时长：{meeting.duration_minutes} 分钟\n"
+                    f"请确认是否可以参加。"
+                )
                 log.updated_at = datetime.utcnow()
 
         elif result.decision_status == DecisionStatus.NEGOTIATING:
-            # ====== 场景 B: 时间冲突 → NEGOTIATING ======
+            # ====== 场景 B: 时间冲突 → NEGOTIATING → COLLECTING（多轮协商） ======
             meeting.round_count += 1
 
             try:
-                new_state = state_machine.transition(
+                # 第一步：ANALYZING → NEGOTIATING（验证轮次是否超限）
+                state_machine.transition(
                     current=MeetingState.ANALYZING,
                     target=MeetingState.NEGOTIATING,
                     context={
@@ -151,36 +158,59 @@ async def submit_coordination_result(
                         "round_count": meeting.round_count
                     }
                 )
-                meeting.status = new_state.value
+
+                # 第二步：NEGOTIATING → COLLECTING（重新收集冲突用户的时间）
+                new_state = state_machine.transition(
+                    current=MeetingState.NEGOTIATING,
+                    target=MeetingState.COLLECTING,
+                    context={"meeting_id": meeting_id}
+                )
+                meeting.status = new_state.value  # COLLECTING
                 meeting.coordinator_reasoning = result.agent_reasoning
                 meeting.updated_at = datetime.utcnow()
 
-                # 处理 counter_proposals：将妥协建议写入对应用户的日志
+                # 构建需要重新提交的用户邮箱集合
+                target_emails = {p.target_email for p in result.counter_proposals}
+
+                # 获取所有协商日志并构建 email → log 映射
                 logs = db.query(NegotiationLog).filter(
                     NegotiationLog.meeting_id == meeting_id
                 ).all()
 
-                # 构建 email → log 的映射
                 email_to_log = {}
                 for log in logs:
                     user = db.query(User).filter(User.id == log.user_id).first()
                     if user:
                         email_to_log[user.email] = log
 
-                # 先把所有人标记为需要操作（默认行为）
-                for log in logs:
-                    log.action_required = True
-                    log.counter_proposal_message = None
+                # 只标记 counter_proposals 中的用户为需要操作
+                for email, log in email_to_log.items():
+                    if email in target_emails:
+                        # 被 Agent 点名的用户：需要重新提交
+                        log.action_required = True
+                        proposal = next(
+                            (p for p in result.counter_proposals if p.target_email == email),
+                            None
+                        )
+                        if proposal:
+                            log.counter_proposal_message = proposal.message
+                            log.suggested_slots = proposal.suggested_slots
+                        else:
+                            log.counter_proposal_message = None
+                            log.suggested_slots = None
+                    else:
+                        # 未被点名的用户：不需要操作
+                        log.action_required = False
+                        log.counter_proposal_message = None
+                        log.suggested_slots = None
                     log.updated_at = datetime.utcnow()
-
-                # 将 Agent 的定向妥协建议写入指定用户
-                for proposal in result.counter_proposals:
-                    target_log = email_to_log.get(proposal.target_email)
-                    if target_log:
-                        target_log.counter_proposal_message = proposal.message
 
             except ValueError:
                 # 超过最大轮数 → FAILED
+                logs = db.query(NegotiationLog).filter(
+                    NegotiationLog.meeting_id == meeting_id
+                ).all()
+
                 fail_state = state_machine.transition(
                     current=MeetingState.ANALYZING,
                     target=MeetingState.FAILED,
@@ -194,7 +224,14 @@ async def submit_coordination_result(
                 meeting.updated_at = datetime.utcnow()
 
                 for log in logs:
-                    log.action_required = False
+                    log.action_required = True
+                    log.counter_proposal_message = (
+                        f"❌ 会议协商失败\n"
+                        f"会议：{meeting.title}\n"
+                        f"原因：已达最大协商轮数限制\n"
+                        f"如需重新发起，请创建新的会议。"
+                    )
+                    log.suggested_slots = None
                     log.updated_at = datetime.utcnow()
 
         elif result.decision_status == DecisionStatus.FAILED:
@@ -211,12 +248,18 @@ async def submit_coordination_result(
             meeting.coordinator_reasoning = result.agent_reasoning
             meeting.updated_at = datetime.utcnow()
 
+            # 给所有参与者生成 FAILED 通知
             logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             for log in logs:
-                log.action_required = False
-                log.counter_proposal_message = None
+                log.action_required = True
+                log.counter_proposal_message = (
+                    f"❌ 会议协商失败\n"
+                    f"会议：{meeting.title}\n"
+                    f"原因：{result.agent_reasoning}\n"
+                    f"如需重新发起，请创建新的会议。"
+                )
                 log.updated_at = datetime.utcnow()
 
         db.commit()

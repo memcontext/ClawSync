@@ -49,6 +49,7 @@ class NegotiationLog(Base):
     preference_note = Column(Text, nullable=True)
     action_required = Column(Boolean, default=True)
     counter_proposal_message = Column(Text, nullable=True)  # Coordinator 下发的妥协建议
+    suggested_slots = Column(JSON, nullable=True)  # Agent 建议的调整时间槽
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

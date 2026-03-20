@@ -32,9 +32,17 @@ async def get_pending_tasks(
 
             initiator = db.query(User).filter(User.id == meeting.initiator_id).first()
 
-            # 根据是否有历史提交 + 会议状态确定任务类型和消息
-            if meeting.status == "NEGOTIATING" and log.counter_proposal_message:
-                # Coordinator 下发了妥协建议
+            # 根据会议状态 + 日志内容确定任务类型和消息
+            if meeting.status == "CONFIRMED" and log.counter_proposal_message:
+                # 会议已确认 → 通知用户
+                task_type = "MEETING_CONFIRMED"
+                message = log.counter_proposal_message
+            elif meeting.status == "FAILED" and log.counter_proposal_message:
+                # 会议协商失败 → 通知用户
+                task_type = "MEETING_FAILED"
+                message = log.counter_proposal_message
+            elif log.counter_proposal_message:
+                # COLLECTING 或 NEGOTIATING 状态下，有 Agent 的妥协建议（多轮协商）
                 task_type = "COUNTER_PROPOSAL"
                 message = log.counter_proposal_message
             elif not log.latest_slots or log.latest_slots == []:
@@ -53,6 +61,7 @@ async def get_pending_tasks(
                 "initiator": initiator.email if initiator else "未知",
                 "task_type": task_type,
                 "message": message,
+                "suggested_slots": log.suggested_slots or [],
                 "duration_minutes": meeting.duration_minutes,
                 "round_count": meeting.round_count
             })
