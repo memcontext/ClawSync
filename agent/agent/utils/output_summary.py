@@ -24,10 +24,13 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, field_validator
 
 from .agent_input_format import DATA_DIR
+from .logger import get_logger
 from config import (
     DOUBAO_API_KEY, DOUBAO_BASE_URL, DOUBAO_MODEL, LLM_TEMPERATURE,
     NEGOTIATION_TOP_K,
 )
+
+logger = get_logger("output_summary")
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
@@ -392,11 +395,15 @@ def summarize_meeting(
 
     score_data: dict = json.loads(path.read_text(encoding="utf-8"))
     n_slots = max(1, (duration_minutes + 29) // 30)
+    logger.info("summarize_meeting: meeting=%s, duration=%dmin, n_slots=%d, initiator=%s",
+                meeting_id, duration_minutes, n_slots, initiator_id)
 
     # 读取 initiator 的时间槽
     initiator_slots: dict | None = None
     if initiator_id is not None:
         initiator_slots = _get_initiator_slots(meeting_id, initiator_id)
+        initiator_true = sum(1 for v in initiator_slots.values() if v is True)
+        logger.debug("initiator 可用槽数: %d", initiator_true)
 
     # 自动推断参与者总人数
     if total_participants is None:
@@ -406,11 +413,15 @@ def summarize_meeting(
             total_participants = len(data)
         else:
             total_participants = 1
+    logger.info("参与者总人数: %d", total_participants)
 
     # 查找 CONFIRMED 候选块
     candidates = _find_candidate_blocks(
         score_data, n_slots, initiator_slots, total_participants
     )
+    logger.info("CONFIRMED 候选块数量: %d", len(candidates))
+    for c in candidates[:5]:
+        logger.debug("  候选: %s (min_score=%d, conflict=%d)", c["time"], c["min_score"], c["conflict_count"])
 
     # 构建参与者摘要
     participants_summary = _build_participants_summary(
@@ -419,6 +430,7 @@ def summarize_meeting(
 
     if candidates:
         # ── CONFIRMED ────────────────────────────────────────────────────────
+        logger.info("[LLM Agent] 调用 CONFIRMED 链...")
         raw: dict = _build_confirmed_chain().invoke({
             "meeting_id": meeting_id,
             "participants_summary": participants_summary,
@@ -426,16 +438,20 @@ def summarize_meeting(
         })
         raw.setdefault("decision_status", "CONFIRMED")
         raw.setdefault("counter_proposals", [])
+        logger.info("[LLM Agent] CONFIRMED 链返回: %s", json.dumps(raw, ensure_ascii=False))
         result = CoordinatorResult.model_validate(raw)
         return result.model_dump()
 
     # ── NEGOTIATING ──────────────────────────────────────────────────────────
+    logger.info("无 CONFIRMED 候选块，进入 NEGOTIATING 流程")
 
     # 查找冲突最少的候选块（initiator 有空但部分参与者冲突）
     negotiation_blocks = _find_negotiation_blocks(
         score_data, n_slots, initiator_slots or {},
         initiator_id or "",
     )
+
+    logger.info("协商候选块 (top-1): %s", json.dumps(negotiation_blocks, ensure_ascii=False))
 
     # initiator 可用时间
     initiator_free = (
@@ -444,6 +460,7 @@ def summarize_meeting(
     )
 
     # LLM 生成 reasoning
+    logger.info("[LLM Agent] 调用 NEGOTIATING 链...")
     raw: dict = _build_negotiating_chain().invoke({
         "meeting_id": meeting_id,
         "duration_minutes": duration_minutes,
@@ -454,12 +471,18 @@ def summarize_meeting(
         "previous_reasoning": previous_reasoning or "（首轮协商，无上一轮记录）",
     })
 
+    logger.info("[LLM Agent] NEGOTIATING 链返回: %s", json.dumps(raw, ensure_ascii=False))
+
     # 构建 counter_proposals（程序逻辑，不依赖 LLM）
     counter_proposals = _build_counter_proposals(
         negotiation_blocks,
         participants_info or [],
         initiator_id or "",
     )
+
+    logger.info("counter_proposals: %d 个用户", len(counter_proposals))
+    for cp in counter_proposals:
+        logger.debug("  → %s: %s", cp["target_email"], cp["suggested_slots"])
 
     result = CoordinatorResult.model_validate({
         "decision_status": "NEGOTIATING",

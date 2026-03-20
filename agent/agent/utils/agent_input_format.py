@@ -26,6 +26,9 @@ from typing import Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 from config import DOUBAO_API_KEY, DOUBAO_BASE_URL, DOUBAO_MODEL, LLM_TEMPERATURE
+from utils.logger import get_logger
+
+logger = get_logger("agent_input_format")
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
@@ -191,6 +194,7 @@ def _parse_standard_slots(available_slots: list[dict]) -> dict[str, bool]:
             result[key] = True
             current = next_time
 
+    logger.debug("标准格式解析: %d 个区间 → %d 个 True 槽", len(available_slots), len(result))
     return result
 
 
@@ -277,18 +281,22 @@ def user_time_format(
     Returns:
         该用户的完整条目 dict
     """
+    logger.info("[LLM Agent] 自然语言解析 user_id=%s, meeting=%s, input=%r", user_id, meeting_id, user_input)
     output: AvailabilityOutput = _build_chain().invoke({"user_input": user_input})
+    true_count = sum(1 for v in output.slots.values() if v is True)
+    false_count = sum(1 for v in output.slots.values() if v is False)
+    logger.info("[LLM Agent] 解析结果: True=%d, False=%d, other=%d", true_count, false_count, len(output.slots) - true_count - false_count)
 
     if reference_date:
         slots = _convert_llm_slots_to_dated(output.slots, reference_date)
     else:
-        # 无日期上下文，只保留 True/False 的旧格式 key（兜底）
         slots = {k: v for k, v in output.slots.items() if v != "other"}
 
     entry = RoleEntry(user_ID=user_id, meeting_ID=meeting_id, **slots)
     store = _load_store(meeting_id)
     store.root[user_id] = entry
     _save_store(store, meeting_id)
+    logger.debug("已保存 user_id=%s 到 meeting_time_data/%s.json, 槽数=%d", user_id, meeting_id, len(slots))
     return entry.model_dump()
 
 
@@ -311,11 +319,16 @@ def submit_user_time(
         该用户的完整条目 dict
     """
     if _is_standard_slots(user_input):
+        logger.info("submit_user_time: user=%s, meeting=%s, 标准格式 (%d 个区间)", user_id, meeting_id, len(user_input))
         slots = _parse_standard_slots(user_input)  # type: ignore[arg-type]
     else:
+        logger.info("[LLM Agent] submit_user_time: user=%s, meeting=%s, 自然语言=%r", user_id, meeting_id, user_input)
         output: AvailabilityOutput = _build_chain().invoke(
             {"user_input": str(user_input)}
         )
+        true_count = sum(1 for v in output.slots.values() if v is True)
+        false_count = sum(1 for v in output.slots.values() if v is False)
+        logger.info("[LLM Agent] 解析结果: True=%d, False=%d, other=%d", true_count, false_count, len(output.slots) - true_count - false_count)
         if reference_date:
             slots = _convert_llm_slots_to_dated(output.slots, reference_date)
         else:
@@ -325,4 +338,5 @@ def submit_user_time(
     store = _load_store(meeting_id)
     store.root[user_id] = entry
     _save_store(store, meeting_id)
+    logger.debug("已保存 user=%s → meeting_time_data/%s.json, 槽数=%d", user_id, meeting_id, len(slots))
     return entry.model_dump()

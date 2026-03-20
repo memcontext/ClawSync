@@ -21,6 +21,9 @@ from pathlib import Path
 from pydantic import BaseModel, Field, RootModel
 
 from .agent_input_format import _load_store
+from .logger import get_logger
+
+logger = get_logger("scoring")
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
@@ -69,6 +72,7 @@ def score_meeting(meeting_id: str) -> dict:
         )
 
     store = _load_store(meeting_id)
+    logger.info("打分开始: meeting=%s, 参与者=%d", meeting_id, len(store.root))
 
     # ── 第一步：动态收集所有用户提到的时间槽 key ───────────────────────────────
     all_slots: set[str] = set()
@@ -106,6 +110,16 @@ def score_meeting(meeting_id: str) -> dict:
         result[slot] = SlotScore(score=score, conflict=conflict)
 
     meeting_score = MeetingScore.model_validate(result)
+
+    # 统计摘要
+    total_slots = len(result)
+    slots_with_conflict = sum(1 for s in result.values() if s.conflict)
+    max_score = max((s.score for s in result.values()), default=0)
+    logger.info("打分完成: meeting=%s, 总槽数=%d, 有冲突槽=%d, 最高score=%d",
+                meeting_id, total_slots, slots_with_conflict, max_score)
+    for slot_key, slot_score in result.items():
+        if slot_score.conflict:
+            logger.debug("  冲突槽: %s → score=%d, conflict=%s", slot_key, slot_score.score, slot_score.conflict)
 
     path = _score_file(meeting_id)
     path.write_text(
