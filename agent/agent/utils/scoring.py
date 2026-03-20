@@ -82,18 +82,26 @@ def score_meeting(meeting_id: str) -> dict:
     sorted_slots = sorted(all_slots)
 
     # ── 第二步：逐槽打分 ─────────────────────────────────────────────────────
+    # 对于标准格式用户（只存 True 的槽），未出现的槽视为不可用（conflict）
     result: dict[str, SlotScore] = {}
     for slot in sorted_slots:
         score = 0
         conflict: list[str] = []
 
         for user_id, entry in store.root.items():
-            val = (entry.model_extra or {}).get(slot)
+            extras = entry.model_extra or {}
+            val = extras.get(slot)
             if val is True:
                 score += 1
             elif val is False:
                 conflict.append(user_id)
-            # val is None（用户未提及）→ 忽略
+            else:
+                # 用户未提及该槽：如果该用户有其他槽数据，说明是标准格式，
+                # 未出现的槽 = 不可用 → 计入 conflict
+                has_any_slot = any("--" in k for k in extras)
+                if has_any_slot:
+                    conflict.append(user_id)
+                # 否则该用户完全无数据，忽略
 
         result[slot] = SlotScore(score=score, conflict=conflict)
 

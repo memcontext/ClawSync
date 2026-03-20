@@ -4,7 +4,10 @@ summarize_meeting API
 读取 meeting_score/{meeting_id}.json，由 LLM Agent 分析打分数据，
 返回符合 API 8（POST /api/agent/meetings/{meeting_id}/result）的请求体格式。
 
-时间槽 key 格式：YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM（日期感知）
+支持三种决策状态：
+  - CONFIRMED   : 找到全员有空的时间块
+  - NEGOTIATING : 无全员有空时间块，生成 counter_proposals 给冲突用户
+  - FAILED      : 超过最大协商轮次
 
 公开接口：
     summarize_meeting(meeting_id, duration_minutes=30, initiator_id=None, ...) -> dict
@@ -12,7 +15,6 @@ summarize_meeting API
 
 import json
 import re
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -22,7 +24,10 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, field_validator
 
 from .agent_input_format import DATA_DIR
-from config import DOUBAO_API_KEY, DOUBAO_BASE_URL, DOUBAO_MODEL, LLM_TEMPERATURE
+from config import (
+    DOUBAO_API_KEY, DOUBAO_BASE_URL, DOUBAO_MODEL, LLM_TEMPERATURE,
+    NEGOTIATION_TOP_K,
+)
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
@@ -36,7 +41,7 @@ def _score_file(meeting_id: str) -> Path:
 
 class CoordinatorResult(BaseModel):
     """API 8 请求体格式。"""
-    decision_status: Literal["CONFIRMED", "NEGOTIATING"]
+    decision_status: Literal["CONFIRMED", "NEGOTIATING", "FAILED"]
     final_time: str | None = None
     agent_reasoning: str
     counter_proposals: list[dict] = []
@@ -46,7 +51,6 @@ class CoordinatorResult(BaseModel):
     def check_final_time(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        # 格式：YYYY-MM-DD HH:MM-HH:MM（如 2026-03-21 15:00-16:00）
         pattern = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}-\d{2}:\d{2}$"
         if not re.match(pattern, v):
             raise ValueError(f"final_time 格式错误：{v!r}，应为 YYYY-MM-DD HH:MM-HH:MM")
@@ -63,17 +67,23 @@ def _get_initiator_slots(meeting_id: str, initiator_id: str) -> dict[str, bool]:
     entry = data.get(initiator_id, {})
     return {
         k: v for k, v in entry.items()
-        if "--" in str(k)  # 只取 slot key，排除 user_ID / meeting_ID
+        if "--" in str(k)
     }
 
 
 def _are_consecutive(slot_a: str, slot_b: str) -> bool:
     """检查两个日期感知 slot key 是否时间连续。"""
-    # slot_a: "2026-03-21 10:00--2026-03-21 10:30"
-    # slot_b: "2026-03-21 10:30--2026-03-21 11:00"
-    end_of_a = slot_a.split("--")[1]    # "2026-03-21 10:30"
-    start_of_b = slot_b.split("--")[0]  # "2026-03-21 10:30"
+    end_of_a = slot_a.split("--")[1]
+    start_of_b = slot_b.split("--")[0]
     return end_of_a == start_of_b
+
+
+def _slot_to_time_str(block: list[str]) -> str:
+    """将连续 slot key 列表转为 'YYYY-MM-DD HH:MM-HH:MM' 格式。"""
+    block_start = block[0].split("--")[0]       # "2026-03-21 10:00"
+    block_end_full = block[-1].split("--")[1]   # "2026-03-21 11:00"
+    block_end_hm = block_end_full.split(" ")[1] # "11:00"
+    return f"{block_start}-{block_end_hm}"
 
 
 def _find_candidate_blocks(
@@ -83,13 +93,7 @@ def _find_candidate_blocks(
     total_participants: int = 1,
 ) -> list[dict]:
     """
-    从日期感知的 score_data 中查找满足条件的连续时间块：
-      1. 块内所有子槽时间连续
-      2. 若提供 initiator_slots，块内所有子槽 initiator 必须为 True
-      3. 块内所有子槽 score == total_participants（全员有空）
-
-    Returns:
-        [{"time": "2026-03-21 10:00-11:00", "min_score": 3, ...}, ...]
+    查找全员有空的连续时间块（CONFIRMED 候选）。
     """
     sorted_slots = sorted(score_data.keys())
     candidates = []
@@ -97,7 +101,6 @@ def _find_candidate_blocks(
     for i in range(len(sorted_slots) - n_slots + 1):
         block = sorted_slots[i: i + n_slots]
 
-        # ① 检查连续性
         consecutive = True
         for j in range(len(block) - 1):
             if not _are_consecutive(block[j], block[j + 1]):
@@ -106,28 +109,20 @@ def _find_candidate_blocks(
         if not consecutive:
             continue
 
-        # ② initiator 必须在块内所有槽有空
         if initiator_slots is not None:
             if not all(initiator_slots.get(s) is True for s in block):
                 continue
 
-        # ③ 块内每个槽 score 必须等于参与者总人数
         scores = [score_data.get(s, {}).get("score", 0) for s in block]
         if min(scores) < total_participants:
             continue
 
-        # 合并冲突
         conflicts_union: set[str] = set()
         for s in block:
             conflicts_union.update(score_data.get(s, {}).get("conflict", []))
 
-        # 提取 final_time 格式：YYYY-MM-DD HH:MM-HH:MM
-        block_start = block[0].split("--")[0]     # "2026-03-21 10:00"
-        block_end_full = block[-1].split("--")[1]  # "2026-03-21 11:00"
-        block_end_hm = block_end_full.split(" ")[1]  # "11:00"
-
         candidates.append({
-            "time": f"{block_start}-{block_end_hm}",  # "2026-03-21 10:00-11:00"
+            "time": _slot_to_time_str(block),
             "min_score": min(scores),
             "total_score": sum(scores),
             "conflict_count": len(conflicts_union),
@@ -136,6 +131,103 @@ def _find_candidate_blocks(
 
     candidates.sort(key=lambda x: (-x["min_score"], x["conflict_count"]))
     return candidates
+
+
+def _find_negotiation_blocks(
+    score_data: dict,
+    n_slots: int,
+    initiator_slots: dict,
+    initiator_id: str,
+) -> list[dict]:
+    """
+    查找 initiator 有空但存在冲突的连续时间块（NEGOTIATING 候选）。
+    按冲突人数升序排列，相同冲突数随机打乱，只返回 top-1。
+
+    Returns:
+        [{"time": "2026-03-21 07:00-08:00", "conflict_count": 1, "conflicts": ["4"]}]
+    """
+    sorted_slots = sorted(score_data.keys())
+    candidates = []
+
+    for i in range(len(sorted_slots) - n_slots + 1):
+        block = sorted_slots[i: i + n_slots]
+
+        # 检查连续性
+        consecutive = True
+        for j in range(len(block) - 1):
+            if not _are_consecutive(block[j], block[j + 1]):
+                consecutive = False
+                break
+        if not consecutive:
+            continue
+
+        # initiator 必须在块内所有槽有空
+        if not all(initiator_slots.get(s) is True for s in block):
+            continue
+
+        # 收集冲突用户（排除 initiator）
+        conflicts_union: set[str] = set()
+        for s in block:
+            conflicts_union.update(score_data.get(s, {}).get("conflict", []))
+        conflicts_union.discard(initiator_id)
+
+        # 必须有冲突（否则是 CONFIRMED）
+        if not conflicts_union:
+            continue
+
+        candidates.append({
+            "time": _slot_to_time_str(block),
+            "conflict_count": len(conflicts_union),
+            "conflicts": sorted(conflicts_union),
+        })
+
+    # 冲突人数少的排前面，相同冲突数的随机打乱
+    import random
+    random.shuffle(candidates)  # 先随机打乱，保证相同 conflict_count 时随机选取
+    candidates.sort(key=lambda x: x["conflict_count"])
+    return candidates[:1]  # 只返回 top-1
+
+
+def _build_counter_proposals(
+    negotiation_blocks: list[dict],
+    participants_info: list[dict],
+    initiator_id: str,
+) -> list[dict]:
+    """
+    根据协商候选块构建 counter_proposals。
+
+    每个冲突用户收到一条建议，包含冲突最少的 top-K 时间段。
+    发起人不会出现在 counter_proposals 中。
+    """
+    if not negotiation_blocks:
+        return []
+
+    # 收集所有冲突用户 ID
+    conflict_user_ids: set[str] = set()
+    for block in negotiation_blocks:
+        conflict_user_ids.update(block["conflicts"])
+    conflict_user_ids.discard(initiator_id)
+
+    # 建议时间段列表
+    suggested_slots = [block["time"] for block in negotiation_blocks]
+
+    # user_id → email 映射
+    id_to_email = {
+        str(p["user_id"]): p.get("email", f"user_{p['user_id']}")
+        for p in participants_info
+    }
+
+    proposals = []
+    for uid in sorted(conflict_user_ids):
+        email = id_to_email.get(uid, uid)
+        proposals.append({
+            "target_email": email,
+            "message": "以下是经过评估得到的需要你进行协调的时间：",
+            "suggested_slots": suggested_slots,
+        })
+
+    return proposals
+
 
 # ─── 参与者摘要 ──────────────────────────────────────────────────────────────
 
@@ -160,7 +252,6 @@ def _build_participants_summary(
                 lines.append(f"  [{role}] user_id={uid}: 无明确可用时间")
         return "\n".join(lines)
 
-    # 有 participants_info（来自 API 7），优先用 email
     lines = []
     sorted_info = sorted(
         participants_info,
@@ -237,25 +328,27 @@ def _build_negotiating_chain():
         "你是一个会议协调助手，分析为何找不到合适的会议时间，以 json 格式输出。\n\n"
         "冲突分析以发起人（initiator）为基准：\n"
         "- 先列出发起人的可用时间段\n"
-        "- 逐个对比每位参与者，找出谁与发起人的时间不重叠\n\n"
-        "请直接输出一个 json 对象，包含以下字段：\n"
+        "- 逐个对比每位参与者，找出谁与发起人的时间不重叠\n"
+        "- 如果有上一轮的分析结果（previous_reasoning），避免重复相同建议\n\n"
+        "请直接输出一个 json 对象，只包含以下两个字段：\n"
         "- decision_status   : 固定字符串 NEGOTIATING\n"
-        "- final_time        : 固定为 null\n"
         "- agent_reasoning   : 协商失败原因（中文，2-3句话）。"
         "必须说明：发起人 XXX 的可用时间为 XX-XX，"
         "XXX（具体email）与发起人时间冲突（说明其可用时间），"
-        "因此无法找到全员有空的时间段。\n"
-        "- counter_proposals : 固定为空数组"
+        "因此无法找到全员有空的时间段。\n\n"
+        "注意：不要输出 final_time 和 counter_proposals 字段，这些由系统自动填充。"
     )
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", (
             "会议 {meeting_id} 无法找到满足条件的时间块。\n"
-            "会议时长要求：{duration_minutes} 分钟\n\n"
+            "会议时长要求：{duration_minutes} 分钟\n"
+            "当前协商轮次：{round_count}\n\n"
             "参与者信息：\n{participants_summary}\n\n"
             "发起人可用时间槽：\n{initiator_slots}\n\n"
-            "各时间段打分数据（部分）：\n{score_sample}"
+            "冲突最少的候选时间块（发起人有空但部分参与者冲突）：\n{negotiation_blocks}\n\n"
+            "上一轮分析结果：\n{previous_reasoning}"
         )),
     ])
 
@@ -270,18 +363,27 @@ def summarize_meeting(
     total_participants: int | None = None,
     participants_info: list[dict] | None = None,
     meeting_date: str | None = None,
+    round_count: int = 0,
+    max_rounds: int = 3,
+    previous_reasoning: str | None = None,
 ) -> dict:
     """
     分析会议打分数据，返回 API 8 格式的请求体。
 
-    Args:
-        meeting_id        : 会议唯一编号
-        duration_minutes  : 会议时长（分钟）
-        initiator_id      : 发起人 user_id
-        total_participants: 参与者总人数；None 则自动推断
-        participants_info : API 7 的 participants_data 列表
-        meeting_date      : 会议日期（不再用于 slot key，兼容保留）
+    决策逻辑：
+      1. round_count >= max_rounds → FAILED
+      2. 找到全员有空连续块   → CONFIRMED
+      3. 否则                 → NEGOTIATING（含 counter_proposals）
     """
+    # ── FAILED：超过最大协商轮次 ───────────────────────────────────────────────
+    if round_count >= max_rounds:
+        return {
+            "decision_status": "FAILED",
+            "final_time": None,
+            "agent_reasoning": f"经过 {max_rounds} 轮协商，参与者依然无法达成一致的会议时间。",
+            "counter_proposals": [],
+        }
+
     path = _score_file(meeting_id)
     if not path.exists():
         raise FileNotFoundError(
@@ -289,7 +391,6 @@ def summarize_meeting(
         )
 
     score_data: dict = json.loads(path.read_text(encoding="utf-8"))
-
     n_slots = max(1, (duration_minutes + 29) // 30)
 
     # 读取 initiator 的时间槽
@@ -306,7 +407,7 @@ def summarize_meeting(
         else:
             total_participants = 1
 
-    # 查找候选时间块
+    # 查找 CONFIRMED 候选块
     candidates = _find_candidate_blocks(
         score_data, n_slots, initiator_slots, total_participants
     )
@@ -325,32 +426,45 @@ def summarize_meeting(
         })
         raw.setdefault("decision_status", "CONFIRMED")
         raw.setdefault("counter_proposals", [])
+        result = CoordinatorResult.model_validate(raw)
+        return result.model_dump()
 
-    else:
-        # ── NEGOTIATING ──────────────────────────────────────────────────────
-        # initiator 有空的时间槽（完整日期格式）
-        initiator_free = (
-            [k for k, v in initiator_slots.items() if v is True]
-            if initiator_slots else []
-        )
-        # 取前10个有冲突的时间段
-        conflict_sample = {
-            slot: info
-            for slot, info in score_data.items()
-            if info.get("conflict")
-        }
-        sample = dict(list(conflict_sample.items())[:10])
+    # ── NEGOTIATING ──────────────────────────────────────────────────────────
 
-        raw: dict = _build_negotiating_chain().invoke({
-            "meeting_id": meeting_id,
-            "duration_minutes": duration_minutes,
-            "participants_summary": participants_summary,
-            "initiator_slots": json.dumps(sorted(initiator_free), ensure_ascii=False),
-            "score_sample": json.dumps(sample, ensure_ascii=False, indent=2),
-        })
-        raw.setdefault("decision_status", "NEGOTIATING")
-        raw.setdefault("final_time", None)
-        raw.setdefault("counter_proposals", [])
+    # 查找冲突最少的候选块（initiator 有空但部分参与者冲突）
+    negotiation_blocks = _find_negotiation_blocks(
+        score_data, n_slots, initiator_slots or {},
+        initiator_id or "",
+    )
 
-    result = CoordinatorResult.model_validate(raw)
+    # initiator 可用时间
+    initiator_free = (
+        sorted([k for k, v in initiator_slots.items() if v is True])
+        if initiator_slots else []
+    )
+
+    # LLM 生成 reasoning
+    raw: dict = _build_negotiating_chain().invoke({
+        "meeting_id": meeting_id,
+        "duration_minutes": duration_minutes,
+        "round_count": round_count,
+        "participants_summary": participants_summary,
+        "initiator_slots": json.dumps(initiator_free, ensure_ascii=False),
+        "negotiation_blocks": json.dumps(negotiation_blocks, ensure_ascii=False, indent=2),
+        "previous_reasoning": previous_reasoning or "（首轮协商，无上一轮记录）",
+    })
+
+    # 构建 counter_proposals（程序逻辑，不依赖 LLM）
+    counter_proposals = _build_counter_proposals(
+        negotiation_blocks,
+        participants_info or [],
+        initiator_id or "",
+    )
+
+    result = CoordinatorResult.model_validate({
+        "decision_status": "NEGOTIATING",
+        "final_time": None,
+        "agent_reasoning": raw.get("agent_reasoning", "无法找到全员有空的时间段。"),
+        "counter_proposals": counter_proposals,
+    })
     return result.model_dump()

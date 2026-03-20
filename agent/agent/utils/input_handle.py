@@ -140,7 +140,20 @@ def coordinate_from_task(task: dict) -> dict:
     """
     meeting_id: str = task["meeting_id"]
     duration_minutes: int = task.get("duration_minutes", 30)
+    round_count: int = task.get("round_count", 0)
+    max_rounds: int = task.get("max_rounds", 3)
+    previous_reasoning: str | None = task.get("previous_reasoning")
     participants_data: list[dict] = task["participants_data"]
+
+    # ── FAILED：超过最大协商轮次 ────────────────────────────────────────────
+    if round_count >= max_rounds:
+        print(f"  → {meeting_id} 已达最大协商轮次 ({round_count}/{max_rounds})，返回 FAILED")
+        return {
+            "decision_status": "FAILED",
+            "final_time": None,
+            "agent_reasoning": f"经过 {max_rounds} 轮协商，参与者依然无法达成一致的会议时间。",
+            "counter_proposals": [],
+        }
 
     # ── 校验：有且仅有一个 initiator ─────────────────────────────────────────
     initiators = [p for p in participants_data if p.get("role") == "initiator"]
@@ -215,11 +228,14 @@ def coordinate_from_task(task: dict) -> dict:
             print(f"  [WARN]  [{email}] 无时间数据（latest_slots 和 preference_note 均为空），跳过")
 
     handle_meeting(role_inputs=role_inputs, meeting_id=meeting_id, reference_date=meeting_date)
-    print(f"\n  → 正在分析 {meeting_id} 推荐时间（时长 {duration_minutes} 分钟，优先对齐发起人）...")
+    print(f"\n  → 正在分析 {meeting_id} 推荐时间（时长 {duration_minutes} 分钟，轮次 {round_count}/{max_rounds}，优先对齐发起人）...")
     return summarize_meeting(
         meeting_id=meeting_id,
         duration_minutes=duration_minutes,
         initiator_id=initiator_id,
         participants_info=participants_data,
         meeting_date=meeting_date,
+        round_count=round_count,
+        max_rounds=max_rounds,
+        previous_reasoning=previous_reasoning,
     )
