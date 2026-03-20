@@ -22,6 +22,8 @@ import {
   loadSession,
   loadNotifiedMeetings,
   saveNotifiedMeetings,
+  loadPendingDecisions,
+  savePendingDecisions,
 } from "./src/utils/storage.js";
 import { PollingManager } from "./src/utils/polling-manager.js";
 import {
@@ -170,8 +172,13 @@ export default function register(api: any) {
   const notifiedMeetings = new Set<string>(loadNotifiedMeetings());
   // 记录已成功提交但仍在 COLLECTING 的会议，避免无限重试
   const submittedMeetings = new Set<string>();
+  // 等待用户决策的会议（COUNTER_PROPOSAL 已通知用户，等回复）
+  const pendingDecisions = new Set<string>(loadPendingDecisions());
   if (notifiedMeetings.size > 0) {
     console.log(`[ClawSync] 已恢复 ${notifiedMeetings.size} 个已通知会议记录`);
+  }
+  if (pendingDecisions.size > 0) {
+    console.log(`[ClawSync] 已恢复 ${pendingDecisions.size} 个等待用户决策的会议`);
   }
 
   // ============================================================
@@ -250,60 +257,55 @@ export default function register(api: any) {
         continue;
       }
 
-      // ---- INITIAL_SUBMIT / COUNTER_PROPOSAL：自动读日历提交 ----
-      if (taskType === "INITIAL_SUBMIT" || taskType === "COUNTER_PROPOSAL") {
-        // 防止对同一会议无限重复提交（服务端 bug：自己邀请自己时 all_submitted 永远 false）
-        if (submittedMeetings.has(meetingId)) {
-          continue;
-        }
-
-        const responseType = taskType === "INITIAL_SUBMIT" ? "INITIAL" : "COUNTER";
+      // ---- INITIAL_SUBMIT：自动读日历提交空闲时间（静默完成）----
+      if (taskType === "INITIAL_SUBMIT") {
+        if (submittedMeetings.has(meetingId)) continue;
 
         try {
           const result = await apiClient.submitAvailability(meetingId, {
-            response_type: responseType,
+            response_type: "INITIAL",
             available_slots: calendarSlots,
           } as any);
 
           console.log(
-            `[ClawSync] 自动提交「${title}」(${meetingId}) → ${responseType}, status=${result.status}`,
+            `[ClawSync] 自动提交「${title}」(${meetingId}) → INITIAL, status=${result.status}`,
           );
-
-          // 记录已提交，防止下次轮询重复提交
           submittedMeetings.add(meetingId);
-
-          // 提交后即时返回 CONFIRMED —— 构造与服务端 MEETING_CONFIRMED 一致的 message 格式
-          if (result.coordinator_result?.status === "CONFIRMED" && result.coordinator_result?.final_time) {
-            if (!notifiedMeetings.has(meetingId)) {
-              notifiedMeetings.add(meetingId);
-              const duration = t.duration_minutes ?? "";
-              const confirmedMsg = [
-                `✅ 会议已确认！`,
-                `会议：${title}`,
-                `时间：${result.coordinator_result.final_time}`,
-                duration ? `时长：${duration} 分钟` : "",
-              ].filter(Boolean).join("\n");
-              notifications.push(buildConfirmedNotification({
-                ...t,
-                message: confirmedMsg,
-              }));
-            }
-          }
-
-          // 提交后即时返回 FAILED / NO_MATCH
-          if (result.coordinator_result?.status === "FAILED" || result.coordinator_result?.status === "NO_MATCH") {
-            if (!notifiedMeetings.has(meetingId)) {
-              notifiedMeetings.add(meetingId);
-              notifications.push(buildFailedNotification({
-                ...t,
-                message: result.coordinator_result?.reasoning ?? "超过最大协商轮数",
-              }));
-            }
-          }
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           console.error(`[ClawSync] 自动提交「${title}」失败: ${errMsg}`);
         }
+        continue;
+      }
+
+      // ---- COUNTER_PROPOSAL：通知用户，等待决策 ----
+      if (taskType === "COUNTER_PROPOSAL") {
+        // 已通知过且在等待用户回复，跳过
+        if (pendingDecisions.has(meetingId)) continue;
+
+        // 标记为等待用户决策
+        pendingDecisions.add(meetingId);
+        savePendingDecisions([...pendingDecisions]);
+
+        const roundCount = t.round_count ?? 0;
+        const coordinatorMessage = t.message ?? "协调方发来了协商建议。";
+
+        const notifyLines = [
+          `[ClawSync 协商通知] 会议「${title}」需要你的决定`,
+          `会议号：${generateMeetingNumber(meetingId)}`,
+          `协商轮次：第 ${roundCount} 轮`,
+          `协调方消息：${coordinatorMessage}`,
+          "",
+          "请告诉用户以上信息，并询问用户：",
+          "1. 接受建议（我会调用工具提交 ACCEPT_PROPOSAL）",
+          "2. 提出新的时间（用户说出可用时间，我来转换并提交 NEW_PROPOSAL）",
+          "3. 拒绝（会议将终止，我会提交 REJECT）",
+        ];
+        notifications.push(notifyLines.join("\n"));
+
+        console.log(
+          `[ClawSync] 会议「${title}」(${meetingId}) 第${roundCount}轮协商，已通知用户等待决策`,
+        );
         continue;
       }
 
@@ -349,9 +351,13 @@ export default function register(api: any) {
         if (tt === "MEETING_CONFIRMED" || tt === "MEETING_FAILED") {
           return !notifiedMeetings.has(t.meeting_id);
         }
-        // INITIAL_SUBMIT/COUNTER_PROPOSAL：已提交过的不再重试
-        if (tt === "INITIAL_SUBMIT" || tt === "COUNTER_PROPOSAL") {
+        // INITIAL_SUBMIT：已提交过的不再重试
+        if (tt === "INITIAL_SUBMIT") {
           return !submittedMeetings.has(t.meeting_id);
+        }
+        // COUNTER_PROPOSAL：等待用户决策的不再重复通知
+        if (tt === "COUNTER_PROPOSAL") {
+          return !pendingDecisions.has(t.meeting_id);
         }
         return true;
       });
@@ -445,6 +451,18 @@ export default function register(api: any) {
     ...checkAndRespondTasksSchema,
     async execute(_id: string, params: any) {
       const result = await checkHandler(params);
+
+      // 用户通过 Agent 提交了决策 → 清除等待状态，允许后续新轮次
+      if (params.meeting_id && params.response_type && (result as any).success) {
+        if (pendingDecisions.has(params.meeting_id)) {
+          pendingDecisions.delete(params.meeting_id);
+          savePendingDecisions([...pendingDecisions]);
+          console.log(`[ClawSync] 会议 ${params.meeting_id} 用户已决策，清除等待状态`);
+        }
+        // 也清除 submittedMeetings，允许新轮次重新自动提交
+        submittedMeetings.delete(params.meeting_id);
+      }
+
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
@@ -525,10 +543,15 @@ export default function register(api: any) {
             "如果用户的描述中缺少以上任何一项，请主动追问，不要自行假设。",
             "你需要将自然语言中的时间描述转换为 'YYYY-MM-DD HH:MM-HH:MM' 格式。",
             "",
-            "注意：后台轮询会自动读取日历并提交空闲时间，无需每次通知用户。",
-            "只有在会议最终确认或协商无法达成一致时才通知用户。",
-            "收到 [ClawSync 会议确认] 或 [ClawSync 协商失败] 消息时，",
-            "请用自然语言将会议信息完整地告知用户，包括会议名称、会议号、时间等。",
+            "后台行为说明：",
+            "- 收到会议邀请时，后台会自动读取日历提交空闲时间，无需通知用户。",
+            "- 收到协商通知 [ClawSync 协商通知] 时，说明协调方的妥协建议来了，",
+            "  你需要将建议内容告知用户，并询问用户选择：",
+            "  1. 接受建议 → 调用 check_and_respond_tasks，response_type='ACCEPT_PROPOSAL'",
+            "  2. 提出新时间 → 让用户说出可用时间，你解析后调用 response_type='NEW_PROPOSAL' + available_slots",
+            "  3. 拒绝 → 调用 response_type='REJECT'（会议将终止）",
+            "- 收到 [ClawSync 会议确认] 或 [ClawSync 协商失败] 消息时，",
+            "  请用自然语言将会议信息完整地告知用户。",
           ].join("\n")
         : [
             "[ClawSync 会议助手 - 需要初始化]",
