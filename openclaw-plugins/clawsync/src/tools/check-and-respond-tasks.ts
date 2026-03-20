@@ -22,11 +22,7 @@ import type {
   ResponseType,
   TimeSlot,
 } from "../types/index.js";
-import {
-  getMockAvailableSlots,
-  getMockUserPreferences,
-  formatPreferencesForAgent,
-} from "../utils/mock-calendar.js";
+
 
 /** Tool 的 JSON Schema 定义 */
 export const checkAndRespondTasksSchema = {
@@ -35,7 +31,7 @@ export const checkAndRespondTasksSchema = {
     "检查并响应待办的会议协商任务。",
     "",
     "模式 A - 查看待办（无参数调用）：",
-    "  拉取服务端待办任务列表，返回每个任务的详情、用户日历空闲时段和偏好。",
+    "  拉取服务端待办任务列表，返回每个任务的详情。你需要结合对用户的记忆和日历来处理。",
     "",
     "模式 B - 提交响应（带参数调用）：",
     "  对特定会议提交响应。必须提供 meeting_id 和 response_type。",
@@ -47,7 +43,7 @@ export const checkAndRespondTasksSchema = {
     "  REJECT           — 拒绝方案，会议终止（不需要 available_slots）",
     "",
     "工作流程：",
-    "  1. 后台轮询自动处理 INITIAL_SUBMIT（静默提交空闲时间）",
+    "  1. 收到 INITIAL_SUBMIT 时，根据你对用户的记忆和日历选择空闲时间提交",
     "  2. 收到 [ClawSync 协商通知] 时，协调方的妥协建议已推送给你",
     "  3. 将建议内容告知用户，等用户决定：",
     "     - 用户同意 → 调用本工具，response_type='ACCEPT_PROPOSAL'",
@@ -103,9 +99,6 @@ export const checkAndRespondTasksSchema = {
 
 // ---- 内部: 构建 INITIAL_SUBMIT 任务的返回信息 ----
 function buildInitialSubmitInfo(task: PendingTask): object {
-  const slots = getMockAvailableSlots();
-  const prefs = getMockUserPreferences();
-
   return {
     meeting_id: task.meeting_id,
     title: task.title,
@@ -115,24 +108,18 @@ function buildInitialSubmitInfo(task: PendingTask): object {
     duration_minutes: task.duration_minutes ?? null,
     round_count: task.round_count ?? 0,
     server_message: task.message,
-    calendar_available_slots: slots,
-    user_preferences: formatPreferencesForAgent(prefs),
     instruction: [
       "收到会议邀请，需要提交空闲时间。",
-      "上面的 calendar_available_slots 是用户日历中的可用时段，",
-      "user_preferences 是用户的开会偏好。",
-      "请根据这些信息，再次调用本工具并传入：",
-      "meeting_id、response_type 设为 'INITIAL'、",
-      "以及从日历数据中选择合适的 available_slots。",
+      "请根据你对用户的记忆（开会偏好、习惯等）和用户的日历，",
+      "选择合适的空闲时间段，然后调用本工具提交：",
+      "meeting_id、response_type='INITIAL'、available_slots。",
+      "如果你不清楚用户的空闲时间，请直接询问用户。",
     ].join(""),
   };
 }
 
 // ---- 内部: 构建 COUNTER_PROPOSAL 任务的返回信息 ----
 function buildCounterProposalInfo(task: PendingTask): object {
-  const slots = getMockAvailableSlots();
-  const prefs = getMockUserPreferences();
-
   return {
     meeting_id: task.meeting_id,
     title: task.title,
@@ -142,11 +129,10 @@ function buildCounterProposalInfo(task: PendingTask): object {
     duration_minutes: task.duration_minutes ?? null,
     round_count: task.round_count ?? 0,
     coordinator_message: task.message,
-    calendar_available_slots: slots,
-    user_preferences: formatPreferencesForAgent(prefs),
     instruction: [
       "协调方发来了协商建议，需要用户决策。",
-      "请将 coordinator_message 内容告知用户，同时展示用户当前的日历空闲时段供参考。",
+      "请将 coordinator_message 内容告知用户，",
+      "结合你对用户的记忆（开会偏好）和用户日历情况供参考。",
       "然后等用户决定：",
       "  - 用户同意建议 → 调用本工具，meeting_id + response_type='ACCEPT_PROPOSAL'",
       "  - 用户想改时间 → 调用本工具，meeting_id + response_type='NEW_PROPOSAL' + available_slots",

@@ -3,9 +3,9 @@
 // 架构设计：
 //   1. 插件加载时：恢复 Token → 有 Token 则立即启动轮询
 //   2. 各状态处理：
-//      COLLECTING    → 自动读日历提交空闲时间
+//      COLLECTING    → 通知 Agent，由 Agent 根据记忆和日历提交空闲时间
 //      ANALYZING     → 跳过（等服务端分析完）
-//      NEGOTIATING   → 自动重新提交
+//      NEGOTIATING   → 通知 Agent 处理协商
 //      CONFIRMED     → 主动推送通知给用户（含完整会议信息 + 虚拟会议号）
 //      FAILED        → 主动推送通知给用户
 //   3. 通知去重：持久化已通知 meeting_id
@@ -26,10 +26,6 @@ import {
   savePendingDecisions,
 } from "./src/utils/storage.js";
 import { PollingManager } from "./src/utils/polling-manager.js";
-import {
-  getMockAvailableSlots,
-  getMockAvailableSlotsAsStrings,
-} from "./src/utils/mock-calendar.js";
 
 // Tools
 import {
@@ -230,8 +226,6 @@ export default function register(api: any) {
   async function autoRespondToTasks(tasks: unknown[]): Promise<string[]> {
     const userMessages: string[] = [];
     const notifications: string[] = []; // 收集本轮所有通知，最后批量发送
-    // API 5 submit 实际要求字符串数组格式 "2026-03-19 10:00-12:00"（与文档不一致）
-    const calendarSlots = getMockAvailableSlotsAsStrings();
 
     for (const task of tasks) {
       const t = task as any;
@@ -257,24 +251,31 @@ export default function register(api: any) {
         continue;
       }
 
-      // ---- INITIAL_SUBMIT：自动读日历提交空闲时间（静默完成）----
+      // ---- INITIAL_SUBMIT：通知 Agent，由 Agent 根据记忆和日历处理 ----
       if (taskType === "INITIAL_SUBMIT") {
         if (submittedMeetings.has(meetingId)) continue;
+        if (pendingDecisions.has(meetingId)) continue;
 
-        try {
-          const result = await apiClient.submitAvailability(meetingId, {
-            response_type: "INITIAL",
-            available_slots: calendarSlots,
-          } as any);
+        pendingDecisions.add(meetingId);
+        savePendingDecisions([...pendingDecisions]);
 
-          console.log(
-            `[ClawSync] 自动提交「${title}」(${meetingId}) → INITIAL, status=${result.status}`,
-          );
-          submittedMeetings.add(meetingId);
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          console.error(`[ClawSync] 自动提交「${title}」失败: ${errMsg}`);
-        }
+        const notifyLines = [
+          `[ClawSync 会议邀请] 会议「${title}」需要提交空闲时间`,
+          `会议 ID：${meetingId}`,
+          `会议号：${generateMeetingNumber(meetingId)}`,
+          `发起人：${t.initiator ?? "未知"}`,
+          `时长：${t.duration_minutes ?? "未知"} 分钟`,
+          `消息：${t.message ?? ""}`,
+          "",
+          "请根据你对用户的记忆（开会偏好、习惯）和用户的日历，",
+          "选择合适的空闲时间段，调用 check_and_respond_tasks 提交：",
+          "meeting_id + response_type='INITIAL' + available_slots。",
+          "如果你不清楚用户的空闲时间，请询问用户。",
+        ];
+        notifications.push(notifyLines.join("\n"));
+        console.log(
+          `[ClawSync] 会议「${title}」(${meetingId}) 通知 Agent 处理`,
+        );
         continue;
       }
 
@@ -542,9 +543,12 @@ export default function register(api: any) {
             "  - 发起人的可用时间段（如「明天下午2点到5点」）",
             "如果用户的描述中缺少以上任何一项，请主动追问，不要自行假设。",
             "你需要将自然语言中的时间描述转换为 'YYYY-MM-DD HH:MM-HH:MM' 格式。",
+            "同时，请根据你对用户的记忆（如开会偏好、不喜欢的时段等），",
+            "自动填写 preference_note 参数，帮助协调方更好地安排时间。",
             "",
             "后台行为说明：",
-            "- 收到会议邀请时，后台会自动读取日历提交空闲时间，无需通知用户。",
+            "- 收到 [ClawSync 会议邀请] 时，你需要根据对用户的记忆和日历选择空闲时间提交。",
+            "  如果你不清楚用户的空闲时间，请询问用户。",
             "- 收到协商通知 [ClawSync 协商通知] 时，说明协调方的妥协建议来了，",
             "  你需要将建议内容告知用户，并询问用户选择：",
             "  1. 接受建议 → 调用 check_and_respond_tasks，response_type='ACCEPT_PROPOSAL'",

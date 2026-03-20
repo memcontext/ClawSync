@@ -9,10 +9,6 @@
 
 import type { ClawSyncApiClient } from "../utils/api-client.js";
 import type { InitiateMeetingRequest } from "../types/index.js";
-import {
-  getMockUserPreferences,
-  formatPreferencesForAgent,
-} from "../utils/mock-calendar.js";
 
 /** Tool 的 JSON Schema 定义 */
 export const initiateMeetingSchema = {
@@ -60,7 +56,7 @@ export const initiateMeetingSchema = {
       preference_note: {
         type: "string" as const,
         description:
-          "发起人的额外偏好说明（可选），例如 '尽量安排在下午，我不喜欢早会'",
+          "发起人的偏好说明（可选）。请根据你对用户的记忆自动填写，例如用户不喜欢早会、周五下午不开会等。也可包含用户本次额外说明的偏好。",
       },
     },
     required: ["title", "duration_minutes", "invitees", "available_slots"],
@@ -106,12 +102,8 @@ export function createInitiateMeetingHandler(apiClient: ClawSyncApiClient) {
       };
     }
 
-    // 3. 获取用户偏好并合并 preference_note
-    const userPrefs = getMockUserPreferences();
-    const prefsContext = formatPreferencesForAgent(userPrefs);
-    const finalNote = preference_note
-      ? `${preference_note}\n\n${prefsContext}`
-      : prefsContext;
+    // 3. preference_note 由 Agent 根据对用户的记忆自行填写
+    const finalNote = preference_note ?? undefined;
 
     // 4. 构造请求
     const requestData: InitiateMeetingRequest = {
