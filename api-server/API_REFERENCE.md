@@ -4,7 +4,7 @@
 >
 > Base URL: `http://39.105.143.2:7010`
 >
-> 版本: v1.1.0 | 更新日期: 2026-03-20
+> 版本: v1.2.0 | 更新日期: 2026-03-20
 
 ---
 
@@ -354,6 +354,8 @@ Agent 端接口（API 7-8）当前无需认证（内部服务调用）。
                 "title": "技术方案评审",
                 "duration_minutes": 30,
                 "round_count": 0,
+                "max_rounds": 3,
+                "previous_reasoning": null,
                 "participants_data": [
                     {
                         "user_id": 4,
@@ -381,8 +383,11 @@ Agent 端接口（API 7-8）当前无需认证（内部服务调用）。
 }
 ```
 
-> **注意:** `latest_slots` 为 `{start, end}` 字典格式，已由 Server 自动转换。
-> `round_count > 0` 表示这是多轮协商中的重新分析。
+> **注意:**
+> - `latest_slots` 为 `{start, end}` 字典格式，已由 Server 自动转换。
+> - `round_count > 0` 表示这是多轮协商中的重新分析。
+> - **v1.2 新增:** `max_rounds` — Agent 可用此字段判断剩余协商次数（`max_rounds - round_count`），在最后一轮做更激进的妥协。
+> - **v1.2 新增:** `previous_reasoning` — 上一轮 Agent 的分析结论，第 1 轮为 `null`。Agent 可参考上一轮分析避免重复建议。
 
 ---
 
@@ -541,6 +546,13 @@ Agent 完成 LLM 推理后，调用此接口将决策写回数据库。
 ---
 
 ## 更新日志
+
+### v1.2.0 (2026-03-20)
+
+**Agent 轮询上下文增强**
+
+1. **API 7 新增 `max_rounds` 字段** — Agent 知道最大协商轮数，可判断剩余机会
+2. **API 7 新增 `previous_reasoning` 字段** — Agent 获取上一轮自己的分析结论，避免重复建议
 
 ### v1.1.0 (2026-03-20)
 

@@ -68,6 +68,8 @@ async def get_agent_pending_tasks(db: Session = Depends(get_db)):
                 "title": meeting.title,
                 "duration_minutes": meeting.duration_minutes,
                 "round_count": meeting.round_count,
+                "max_rounds": state_machine.max_rounds,
+                "previous_reasoning": meeting.coordinator_reasoning,
                 "participants_data": participants_data
             })
 
