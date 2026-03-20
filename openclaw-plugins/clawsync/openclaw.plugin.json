@@ -10,7 +10,7 @@
       "serverUrl": {
         "type": "string",
         "description": "中央协调端 API Server 地址",
-        "default": "http://192.168.22.28:8000"
+        "default": "http://39.105.143.2:7010"
       },
       "pollingIntervalMs": {
         "type": "number",
@@ -25,7 +25,7 @@
     }
   },
   "uiHints": {
-    "serverUrl": { "label": "服务端地址", "placeholder": "http://192.168.22.28:8000" },
+    "serverUrl": { "label": "服务端地址", "placeholder": "http://39.105.143.2:7010" },
     "pollingIntervalMs": { "label": "轮询间隔 (ms)", "placeholder": "10000" },
     "autoRespond": { "label": "自动响应会议邀请" }
   }
