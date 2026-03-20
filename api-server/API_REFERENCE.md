@@ -4,7 +4,7 @@
 >
 > Base URL: `http://39.105.143.2:7010`
 >
-> 版本: v1.2.0 | 更新日期: 2026-03-20
+> 版本: v1.3.0 | 更新日期: 2026-03-20
 
 ---
 
@@ -262,7 +262,7 @@ Agent 端接口（API 7-8）当前无需认证（内部服务调用）。
 | `NEW_PROPOSAL` | 提交新方案 | 在协商轮次中提交新的时间，必须包含 `available_slots` |
 | `COUNTER` | 提交新方案（插件别名） | 等同于 `NEW_PROPOSAL`，插件兼容 |
 | `ACCEPT_PROPOSAL` | 接受妥协方案 | 无需 `available_slots` |
-| `REJECT` | 拒绝方案 | 会议直接终止为 FAILED |
+| `REJECT` | 拒绝会议/方案 | COLLECTING 或 NEGOTIATING 阶段均可使用，会议直接终止为 FAILED，通知所有其他参与者 |
 
 **响应体 (INITIAL/NEW_PROPOSAL/COUNTER):**
 
@@ -285,10 +285,13 @@ Agent 端接口（API 7-8）当前无需认证（内部服务调用）。
 
 **响应体 (REJECT):**
 
+> **v1.3 更新:** REJECT 现在支持在 COLLECTING 阶段使用（拒绝会议邀请），不再仅限于 NEGOTIATING 阶段。
+> 拒绝后会自动通知所有其他参与者会议已失败。
+
 ```json
 {
     "code": 200,
-    "message": "已拒绝方案，会议协商终止",
+    "message": "已拒绝，会议协商终止",
     "data": {
         "id": "mtg_8899aabb",
         "meeting_id": "mtg_8899aabb",
@@ -546,6 +549,15 @@ Agent 完成 LLM 推理后，调用此接口将决策写回数据库。
 ---
 
 ## 更新日志
+
+### v1.3.0 (2026-03-20)
+
+**COLLECTING 阶段支持 REJECT + 失败通知**
+
+1. **REJECT 支持 COLLECTING 阶段** — 被邀请人可以在收集阶段直接拒绝会议邀请，不再需要先提交时间
+2. **状态机新增 COLLECTING → FAILED 转换** — 支持上述拒绝场景
+3. **REJECT 后通知其他参与者** — 所有其他参与者收到 `MEETING_FAILED` 类型的待办通知
+4. **区分拒绝场景** — COLLECTING 阶段显示"拒绝了会议邀请"，NEGOTIATING 阶段显示"拒绝了协商方案"
 
 ### v1.2.0 (2026-03-20)
 

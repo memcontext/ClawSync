@@ -82,7 +82,8 @@ async def create_meeting(
             code=200,
             message="会议协商已发起，等待受邀人响应",
             data={
-                "meeting_id": meeting_id,
+                "id": meeting_id,              # 插件期望 "id"
+                "meeting_id": meeting_id,       # 保持向后兼容
                 "title": meeting_data.title,
                 "status": new_meeting.status,
                 "duration_minutes": meeting_data.duration_minutes,
@@ -243,9 +244,18 @@ async def submit_availability(
         # ---- 根据 response_type 分支处理 ----
 
         if submit_data.response_type == ResponseType.REJECT:
-            # ====== REJECT：拒绝方案，会议直接失败 ======
+            # ====== REJECT：拒绝会议邀请或协商方案，会议直接失败 ======
+            # COLLECTING 阶段：拒绝会议邀请
+            # NEGOTIATING 阶段：拒绝协商方案
+            is_collecting = current_state == MeetingState.COLLECTING
+            reject_reason = (
+                f"用户 {current_user.email} 拒绝了会议邀请"
+                if is_collecting
+                else f"用户 {current_user.email} 拒绝了协商方案"
+            )
+
             negotiation_log.action_required = False
-            negotiation_log.preference_note = submit_data.preference_note or "用户拒绝了妥协方案"
+            negotiation_log.preference_note = submit_data.preference_note or reject_reason
             negotiation_log.counter_proposal_message = None
             negotiation_log.updated_at = datetime.utcnow()
 
@@ -254,21 +264,42 @@ async def submit_availability(
                 target=MeetingState.FAILED,
                 context={
                     "meeting_id": meeting_id,
-                    "reason": f"用户 {current_user.email} 拒绝了协商方案"
+                    "reason": reject_reason
                 }
             )
             meeting.status = fail_state.value
-            meeting.coordinator_reasoning = f"协商失败：{current_user.email} 拒绝了妥协方案"
+            meeting.coordinator_reasoning = f"协商失败：{reject_reason}"
             meeting.updated_at = datetime.utcnow()
+
+            # 通知所有其他参与者会议已失败
+            all_logs = db.query(NegotiationLog).filter(
+                NegotiationLog.meeting_id == meeting_id
+            ).all()
+            for log in all_logs:
+                if log.user_id != current_user.id:
+                    log.action_required = True
+                    log.counter_proposal_message = (
+                        f"❌ 会议协商失败\n"
+                        f"会议：{meeting.title}\n"
+                        f"原因：{reject_reason}\n"
+                        f"如需重新发起，请创建新的会议。"
+                    )
+                    log.updated_at = datetime.utcnow()
+
             db.commit()
 
             return APIResponse(
                 code=200,
-                message="已拒绝方案，会议协商终止",
+                message="已拒绝，会议协商终止",
                 data={
+                    "id": meeting_id,
                     "meeting_id": meeting_id,
                     "response_type": submit_data.response_type.value,
-                    "status": meeting.status
+                    "status": meeting.status,
+                    "all_submitted": False,
+                    "coordinator_result": None,
+                    "created_at": negotiation_log.created_at.isoformat() if negotiation_log.created_at else None,
+                    "updated_at": negotiation_log.updated_at.isoformat() if negotiation_log.updated_at else None
                 }
             )
 
@@ -293,10 +324,14 @@ async def submit_availability(
                 code=200,
                 message="已接受方案" + ("，等待协调 Agent 分析。" if all_accepted else "，等待其他参与者响应"),
                 data={
+                    "id": meeting_id,
                     "meeting_id": meeting_id,
                     "response_type": submit_data.response_type.value,
                     "status": meeting.status,
-                    "all_submitted": all_accepted
+                    "all_submitted": all_accepted,
+                    "coordinator_result": None,
+                    "created_at": negotiation_log.created_at.isoformat() if negotiation_log.created_at else None,
+                    "updated_at": negotiation_log.updated_at.isoformat() if negotiation_log.updated_at else None
                 }
             )
 
@@ -324,10 +359,14 @@ async def submit_availability(
                 code=200,
                 message="提交成功" + ("，已触发服务端协调 Agent 重新计算。" if all_submitted else ""),
                 data={
+                    "id": meeting_id,
                     "meeting_id": meeting_id,
                     "response_type": submit_data.response_type.value,
                     "status": meeting.status,
-                    "all_submitted": all_submitted
+                    "all_submitted": all_submitted,
+                    "coordinator_result": None,
+                    "created_at": negotiation_log.created_at.isoformat() if negotiation_log.created_at else None,
+                    "updated_at": negotiation_log.updated_at.isoformat() if negotiation_log.updated_at else None
                 }
             )
 

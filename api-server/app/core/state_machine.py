@@ -20,7 +20,7 @@ class StateMachine:
         self.max_rounds = max_rounds
         self.transitions = {
             MeetingState.PENDING: [MeetingState.COLLECTING],
-            MeetingState.COLLECTING: [MeetingState.ANALYZING, MeetingState.NEGOTIATING],
+            MeetingState.COLLECTING: [MeetingState.ANALYZING, MeetingState.NEGOTIATING, MeetingState.FAILED],
             MeetingState.ANALYZING: [MeetingState.CONFIRMED, MeetingState.NEGOTIATING, MeetingState.FAILED],
             MeetingState.NEGOTIATING: [MeetingState.COLLECTING, MeetingState.ANALYZING, MeetingState.FAILED],
             MeetingState.CONFIRMED: [],
