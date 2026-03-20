@@ -46,14 +46,36 @@ async def get_pending_tasks(
                 task_type = "COUNTER_PROPOSAL"
                 message = log.counter_proposal_message
             elif not log.latest_slots or log.latest_slots == []:
-                # 首次提交
+                # 首次提交 — 附带发起人的可用时间段，帮助被邀请人参考
                 task_type = "INITIAL_SUBMIT"
                 initiator_email = initiator.email if initiator else "未知"
-                message = f"{initiator_email} 邀请您参加会议，请提供您的空闲时间。"
+
+                # 查询发起人的时间槽
+                initiator_log = db.query(NegotiationLog).filter(
+                    NegotiationLog.meeting_id == meeting.id,
+                    NegotiationLog.role == "initiator"
+                ).first()
+                initiator_slots = initiator_log.latest_slots if initiator_log and initiator_log.latest_slots else []
+
+                if initiator_slots:
+                    slots_text = "、".join(initiator_slots[:5])
+                    message = f"{initiator_email} 邀请您参加会议「{meeting.title}」（{meeting.duration_minutes}分钟）。\n发起人可用时间：{slots_text}\n请提供您的空闲时间。"
+                else:
+                    message = f"{initiator_email} 邀请您参加会议，请提供您的空闲时间。"
             else:
                 # 需要重新提交但没有具体建议
                 task_type = "COUNTER_PROPOSAL"
                 message = f"协调助手提示：由于时间冲突，请重新提供您的空闲时间段。（第 {meeting.round_count} 轮协商）"
+
+            # 获取发起人时间槽（用于所有任务类型）
+            if task_type == "INITIAL_SUBMIT":
+                _initiator_log = db.query(NegotiationLog).filter(
+                    NegotiationLog.meeting_id == meeting.id,
+                    NegotiationLog.role == "initiator"
+                ).first()
+                _initiator_slots = _initiator_log.latest_slots if _initiator_log and _initiator_log.latest_slots else []
+            else:
+                _initiator_slots = []
 
             pending_tasks.append({
                 "meeting_id": meeting.id,
@@ -62,6 +84,7 @@ async def get_pending_tasks(
                 "task_type": task_type,
                 "message": message,
                 "suggested_slots": log.suggested_slots or [],
+                "initiator_slots": _initiator_slots,
                 "duration_minutes": meeting.duration_minutes,
                 "round_count": meeting.round_count
             })
