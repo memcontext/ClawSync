@@ -120,6 +120,42 @@ export function createInitiateMeetingHandler(apiClient: ClawSyncApiClient) {
     try {
       const result = await apiClient.initiateMeeting(requestData);
 
+      // 6. 校验响应字段
+      const errors: string[] = [];
+      if (!result.id || typeof result.id !== "string") {
+        errors.push("响应缺少 id 字段或格式错误");
+      }
+      if (!result.status) {
+        errors.push("响应缺少 status 字段");
+      } else if (result.status !== "COLLECTING") {
+        errors.push(`状态异常: 期望 COLLECTING，实际 ${result.status}`);
+      }
+      if (!result.title || typeof result.title !== "string") {
+        errors.push("响应缺少 title 字段");
+      }
+      if (!result.duration_minutes || result.duration_minutes <= 0) {
+        errors.push("响应缺少 duration_minutes 或值无效");
+      }
+      if (!result.initiator_data) {
+        errors.push("响应缺少 initiator_data 字段");
+      } else {
+        if (!result.initiator_data.available_slots || !Array.isArray(result.initiator_data.available_slots) || result.initiator_data.available_slots.length === 0) {
+          errors.push("initiator_data.available_slots 为空或格式错误");
+        }
+      }
+      if (!result.invitees || !Array.isArray(result.invitees) || result.invitees.length === 0) {
+        errors.push("响应缺少 invitees 或为空数组");
+      }
+
+      if (errors.length > 0) {
+        console.log(`[ClawSync] initiate_meeting 响应校验警告: ${errors.join("; ")}`);
+        return {
+          success: false,
+          message: `会议创建请求已发送，但响应字段校验不通过: ${errors.join("; ")}`,
+          raw_response: result,
+        };
+      }
+
       return {
         success: true,
         message: `会议协商已发起！`,
