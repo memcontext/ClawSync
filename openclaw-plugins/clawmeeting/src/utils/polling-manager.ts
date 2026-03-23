@@ -1,5 +1,5 @@
 // ============================================================
-// ClawSync Plugin - 轮询管理器
+// ClawMeeting Plugin - 轮询管理器
 // 独立模块，管理后台定时轮询的生命周期
 //
 // 设计要点：
@@ -31,7 +31,7 @@ export class PollingManager {
     if (!this.options.enabled) return;
     if (this.running) return;
 
-    console.log(`[clawsync:polling] 启动后台轮询，间隔 ${this.options.intervalMs}ms`);
+    console.log(`[clawmeeting:polling] 启动后台轮询，间隔 ${this.options.intervalMs}ms`);
     this.running = true;
 
     this.timer = setInterval(async () => {
@@ -51,7 +51,7 @@ export class PollingManager {
           }
         }
       } catch (err) {
-        console.error("[clawsync:polling] 轮询出错:", err);
+        console.error("[clawmeeting:polling] 轮询出错:", err);
       } finally {
         this.polling = false;
       }
@@ -64,7 +64,7 @@ export class PollingManager {
       this.timer = null;
       this.running = false;
       this.polling = false;
-      console.log("[clawsync:polling] 后台轮询已停止。");
+      console.log("[clawmeeting:polling] 后台轮询已停止。");
     }
   }
 

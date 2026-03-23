@@ -1,5 +1,5 @@
 // ============================================================
-// ClawSync Plugin - Mock 日历与上下文数据
+// ClawMeeting Plugin - Mock 日历与上下文数据
 // MVP 阶段使用写死的模拟数据，后续替换为真实日历集成
 //
 // 注意: available_slots 格式已对齐服务端 API_REFERENCE.md

@@ -1,6 +1,6 @@
 {
-  "id": "clawsync",
-  "name": "ClawSync Meeting Negotiator",
+  "id": "clawmeeting",
+  "name": "ClawMeeting - AI Meeting Negotiator",
   "version": "1.0.0",
   "description": "智能会议协商代理插件 - 作为用户的贴身助理，负责收集情报、保护隐私并代表用户进行初步博弈",
   "skills": ["./skills"],

@@ -7,14 +7,14 @@
 // Agent 调用此工具 → 调 API → 存 Token → 返回结果
 // ============================================================
 
-import type { ClawSyncApiClient } from "../utils/api-client.js";
+import type { ClawMeetingApiClient } from "../utils/api-client.js";
 import { saveCredentials, loadCredentials } from "../utils/storage.js";
 
 /** Tool 的 JSON Schema 定义 */
 export const bindIdentitySchema = {
   name: "bind_identity",
   description: [
-    "将用户邮箱绑定到 ClawSync 会议协商服务，获取身份 Token。",
+    "将用户邮箱绑定到 ClawMeeting 会议协商服务，获取身份 Token。",
     "首次使用本插件时必须先调用此工具完成身份注册。",
     "如果用户已经绑定过，会返回已有的凭证信息。",
   ].join(" "),
@@ -37,7 +37,7 @@ export const bindIdentitySchema = {
  *                        后续可扩展为触发其他初始化流程
  */
 export function createBindIdentityHandler(
-  apiClient: ClawSyncApiClient,
+  apiClient: ClawMeetingApiClient,
   onBindSuccess?: () => void,
 ) {
   return async (params: { email: string }) => {

@@ -16,7 +16,7 @@
 // 格式严格对齐服务端 schemas.py ResponseType 枚举
 // ============================================================
 
-import type { ClawSyncApiClient } from "../utils/api-client.js";
+import type { ClawMeetingApiClient } from "../utils/api-client.js";
 import type {
   PendingTask,
   ResponseType,
@@ -44,7 +44,7 @@ export const checkAndRespondTasksSchema = {
     "",
     "工作流程：",
     "  1. 收到 INITIAL_SUBMIT 时，根据你对用户的记忆和日历选择空闲时间提交",
-    "  2. 收到 [ClawSync 协商通知] 时，协调方的妥协建议已推送给你",
+    "  2. 收到 [ClawMeeting 协商通知] 时，协调方的妥协建议已推送给你",
     "  3. 将建议内容告知用户，等用户决定：",
     "     - 用户同意 → 调用本工具，response_type='ACCEPT_PROPOSAL'",
     "     - 用户想改时间 → 调用本工具，response_type='NEW_PROPOSAL' + available_slots",
@@ -172,7 +172,7 @@ function buildCounterProposalInfo(task: PendingTask): object {
 
 /** Tool 的处理函数 */
 export function createCheckAndRespondTasksHandler(
-  apiClient: ClawSyncApiClient,
+  apiClient: ClawMeetingApiClient,
 ) {
   return async (params: {
     meeting_id?: string;
@@ -269,7 +269,7 @@ export function createCheckAndRespondTasksHandler(
             try {
               meetingDetail = await apiClient.getMeetingDetail(task.meeting_id);
             } catch (e) {
-              console.log(`[ClawSync] 拉详情失败，退化为基础信息: ${e}`);
+              console.log(`[ClawMeeting] 拉详情失败，退化为基础信息: ${e}`);
             }
 
             const info = buildInitialSubmitInfo(task) as any;
@@ -294,7 +294,7 @@ export function createCheckAndRespondTasksHandler(
             try {
               meetingDetail = await apiClient.getMeetingDetail(task.meeting_id);
             } catch (e) {
-              console.log(`[ClawSync] 拉详情失败，退化为基础信息: ${e}`);
+              console.log(`[ClawMeeting] 拉详情失败，退化为基础信息: ${e}`);
             }
 
             const info = buildCounterProposalInfo(task) as any;
@@ -359,7 +359,7 @@ export function createCheckAndRespondTasksHandler(
             break;
           default:
             console.log(
-              `[ClawSync] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}`,
+              `[ClawMeeting] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}`,
             );
             results.push({
               meeting_id: task.meeting_id,

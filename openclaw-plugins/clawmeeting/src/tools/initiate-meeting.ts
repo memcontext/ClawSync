@@ -7,7 +7,7 @@
 // 用户只需用自然语言描述，Agent 自行解析为结构化数据后调用此工具。
 // ============================================================
 
-import type { ClawSyncApiClient } from "../utils/api-client.js";
+import type { ClawMeetingApiClient } from "../utils/api-client.js";
 import type { InitiateMeetingRequest } from "../types/index.js";
 
 /** Tool 的 JSON Schema 定义 */
@@ -64,7 +64,7 @@ export const initiateMeetingSchema = {
 };
 
 /** Tool 的处理函数 */
-export function createInitiateMeetingHandler(apiClient: ClawSyncApiClient) {
+export function createInitiateMeetingHandler(apiClient: ClawMeetingApiClient) {
   return async (params: {
     title: string;
     duration_minutes: number;
@@ -148,7 +148,7 @@ export function createInitiateMeetingHandler(apiClient: ClawSyncApiClient) {
       }
 
       if (errors.length > 0) {
-        console.log(`[ClawSync] initiate_meeting 响应校验警告: ${errors.join("; ")}`);
+        console.log(`[ClawMeeting] initiate_meeting 响应校验警告: ${errors.join("; ")}`);
         return {
           success: false,
           message: `会议创建请求已发送，但响应字段校验不通过: ${errors.join("; ")}`,

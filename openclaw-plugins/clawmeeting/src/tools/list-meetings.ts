@@ -10,7 +10,7 @@
 // 对齐 API_REFERENCE.md v1.0.0
 // ============================================================
 
-import type { ClawSyncApiClient } from "../utils/api-client.js";
+import type { ClawMeetingApiClient } from "../utils/api-client.js";
 
 /** Tool 的 JSON Schema 定义 */
 export const listMeetingsSchema = {
@@ -39,7 +39,7 @@ export const listMeetingsSchema = {
 };
 
 /** Tool 的处理函数 */
-export function createListMeetingsHandler(apiClient: ClawSyncApiClient) {
+export function createListMeetingsHandler(apiClient: ClawMeetingApiClient) {
   return async (params: { meeting_id?: string }) => {
     const { meeting_id } = params;
 

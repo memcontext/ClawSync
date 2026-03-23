@@ -1,5 +1,5 @@
 // ============================================================
-// ClawSync Plugin - 本地存储工具
+// ClawMeeting Plugin - 本地存储工具
 // 管理 Token、用户偏好等的本地持久化
 // ============================================================
 
@@ -9,7 +9,7 @@ import { homedir } from "os";
 import type { StoredCredentials, UserPreferences, SessionContext } from "../types/index.js";
 
 // 存储路径（由 initStorage 初始化，基于插件 ID 动态生成）
-let STORAGE_DIR = join(homedir(), ".openclaw", "clawsync");
+let STORAGE_DIR = join(homedir(), ".openclaw", "clawmeeting");
 let CREDENTIALS_FILE = join(STORAGE_DIR, "credentials.json");
 let PREFERENCES_FILE = join(STORAGE_DIR, "preferences.json");
 let SESSION_FILE = join(STORAGE_DIR, "session.json");

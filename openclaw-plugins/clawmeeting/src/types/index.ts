@@ -1,5 +1,5 @@
 // ============================================================
-// ClawSync Plugin - 类型定义
+// ClawMeeting Plugin - 类型定义
 // 严格对齐服务端 API_REFERENCE.md v1.0.0
 // ============================================================
 
@@ -193,7 +193,7 @@ export interface SessionContext {
 }
 
 // ---- 插件配置 ----
-export interface ClawSyncPluginConfig {
+export interface ClawMeetingPluginConfig {
   serverUrl: string;
   pollingIntervalMs: number;
   autoRespond: boolean;

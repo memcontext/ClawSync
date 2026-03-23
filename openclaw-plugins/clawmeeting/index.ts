@@ -1,5 +1,5 @@
 // ============================================================
-// ClawSync Plugin - 入口文件
+// ClawMeeting Plugin - 入口文件
 // 架构设计：
 //   1. 插件加载时：恢复 Token → 有 Token 则立即启动轮询
 //   2. 各状态处理：
@@ -14,7 +14,7 @@
 
 import { readFileSync } from "fs";
 import { join } from "path";
-import { ClawSyncApiClient } from "./src/utils/api-client.js";
+import { ClawMeetingApiClient } from "./src/utils/api-client.js";
 import {
   initStorage,
   loadCredentials,
@@ -46,10 +46,10 @@ import {
 } from "./src/tools/list-meetings.js";
 
 // Types
-import type { ClawSyncPluginConfig, SessionContext, TaskType } from "./src/types/index.js";
+import type { ClawMeetingPluginConfig, SessionContext, TaskType } from "./src/types/index.js";
 
 // ---- 默认配置 ----
-const DEFAULT_CONFIG: ClawSyncPluginConfig = {
+const DEFAULT_CONFIG: ClawMeetingPluginConfig = {
   serverUrl: "http://39.105.143.2:7010",
   pollingIntervalMs: 10000,
   autoRespond: true,
@@ -71,9 +71,9 @@ function readPluginId(): string {
   try {
     const manifestPath = join(__dirname, "openclaw.plugin.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-    return manifest.id ?? "clawsync";
+    return manifest.id ?? "clawmeeting";
   } catch {
-    return "clawsync";
+    return "clawmeeting";
   }
 }
 
@@ -83,7 +83,7 @@ export default function register(api: any) {
   // ============================================================
   // 1. 读取插件配置
   // ============================================================
-  const pluginConfig: ClawSyncPluginConfig = {
+  const pluginConfig: ClawMeetingPluginConfig = {
     ...DEFAULT_CONFIG,
     ...(api.config?.plugins?.entries?.[PLUGIN_ID]?.config ?? {}),
   };
@@ -95,12 +95,12 @@ export default function register(api: any) {
   // ============================================================
   // 2. 初始化 API Client + 恢复 Token
   // ============================================================
-  const apiClient = new ClawSyncApiClient(pluginConfig.serverUrl);
+  const apiClient = new ClawMeetingApiClient(pluginConfig.serverUrl);
 
   const savedCreds = loadCredentials();
   if (savedCreds?.token) {
     apiClient.setToken(savedCreds.token);
-    console.log(`[ClawSync] 已恢复身份凭证: ${savedCreds.email} (user_id: ${savedCreds.user_id})`);
+    console.log(`[ClawMeeting] 已恢复身份凭证: ${savedCreds.email} (user_id: ${savedCreds.user_id})`);
   }
 
   // ============================================================
@@ -108,7 +108,7 @@ export default function register(api: any) {
   // ============================================================
   let sessionCtx: SessionContext = loadSession() ?? { sessionKey: "agent:main:main" };
   if (sessionCtx.sessionKey) {
-    console.log(`[ClawSync] session: ${sessionCtx.sessionKey}`);
+    console.log(`[ClawMeeting] session: ${sessionCtx.sessionKey}`);
   }
 
   // ============================================================
@@ -120,9 +120,9 @@ export default function register(api: any) {
     ?? null;
 
   if (gatewayToken) {
-    console.log("[ClawSync] 已获取 gateway token，支持主动推送通知");
+    console.log("[ClawMeeting] 已获取 gateway token，支持主动推送通知");
   } else {
-    console.log("[ClawSync] 未获取 gateway token，通知将在用户下次交互时展示");
+    console.log("[ClawMeeting] 未获取 gateway token，通知将在用户下次交互时展示");
   }
 
   // ============================================================
@@ -148,16 +148,16 @@ export default function register(api: any) {
       });
 
       if (res.ok) {
-        console.log("[ClawSync] 主动推送通知成功");
+        console.log("[ClawMeeting] 主动推送通知成功");
         return true;
       } else {
         const body = await res.text();
-        console.error(`[ClawSync] 主动推送失败: ${res.status} ${body}`);
+        console.error(`[ClawMeeting] 主动推送失败: ${res.status} ${body}`);
         return false;
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[ClawSync] 主动推送出错: ${errMsg}`);
+      console.error(`[ClawMeeting] 主动推送出错: ${errMsg}`);
       return false;
     }
   }
@@ -171,10 +171,10 @@ export default function register(api: any) {
   // 等待用户决策的会议（COUNTER_PROPOSAL 已通知用户，等回复）
   const pendingDecisions = new Set<string>(loadPendingDecisions());
   if (notifiedMeetings.size > 0) {
-    console.log(`[ClawSync] 已恢复 ${notifiedMeetings.size} 个已通知会议记录`);
+    console.log(`[ClawMeeting] 已恢复 ${notifiedMeetings.size} 个已通知会议记录`);
   }
   if (pendingDecisions.size > 0) {
-    console.log(`[ClawSync] 已恢复 ${pendingDecisions.size} 个等待用户决策的会议`);
+    console.log(`[ClawMeeting] 已恢复 ${pendingDecisions.size} 个等待用户决策的会议`);
   }
 
   // ============================================================
@@ -192,7 +192,7 @@ export default function register(api: any) {
 
     // 服务端 message 已包含完整信息（标题、时间、时长），直接附加
     const lines = [
-      `[ClawSync 会议确认]`,
+      `[ClawMeeting 会议确认]`,
       `会议号：${meetingNumber}`,
     ];
     if (serverMessage) {
@@ -208,7 +208,7 @@ export default function register(api: any) {
     const serverMessage = t.message ?? "";
 
     const lines = [
-      `[ClawSync 协商失败]`,
+      `[ClawMeeting 协商失败]`,
       `会议名称：${title}`,
       `会议号：${meetingNumber}`,
     ];
@@ -237,7 +237,7 @@ export default function register(api: any) {
       if (taskType === "MEETING_CONFIRMED") {
         if (notifiedMeetings.has(meetingId)) continue;
         notifiedMeetings.add(meetingId);
-        console.log(`[ClawSync] 会议「${title}」(${meetingId}) 已确认`);
+        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 已确认`);
         notifications.push(buildConfirmedNotification(t));
         continue;
       }
@@ -246,7 +246,7 @@ export default function register(api: any) {
       if (taskType === "MEETING_FAILED") {
         if (notifiedMeetings.has(meetingId)) continue;
         notifiedMeetings.add(meetingId);
-        console.log(`[ClawSync] 会议「${title}」(${meetingId}) 协商失败`);
+        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 协商失败`);
         notifications.push(buildFailedNotification(t));
         continue;
       }
@@ -261,7 +261,7 @@ export default function register(api: any) {
         savePendingDecisions([...pendingDecisions]);
 
         const notifyLines = [
-          `[ClawSync 会议邀请]`,
+          `[ClawMeeting 会议邀请]`,
           `会议：「${title}」`,
           `会议 ID：${meetingId}`,
           `会议号：${generateMeetingNumber(meetingId)}`,
@@ -287,7 +287,7 @@ export default function register(api: any) {
 
         notifications.push(notifyLines.join("\n"));
         console.log(
-          `[ClawSync] 会议「${title}」(${meetingId}) 通知 Agent 处理`,
+          `[ClawMeeting] 会议「${title}」(${meetingId}) 通知 Agent 处理`,
         );
         continue;
       }
@@ -305,7 +305,7 @@ export default function register(api: any) {
         const coordinatorMessage = t.message ?? "协调方发来了协商建议。";
 
         const notifyLines = [
-          `[ClawSync 协商通知]`,
+          `[ClawMeeting 协商通知]`,
           `会议：「${title}」`,
           `会议号：${generateMeetingNumber(meetingId)}`,
           `协商轮次：第 ${roundCount} 轮`,
@@ -314,7 +314,7 @@ export default function register(api: any) {
         notifications.push(notifyLines.join("\n"));
 
         console.log(
-          `[ClawSync] 会议「${title}」(${meetingId}) 第${roundCount}轮协商，已通知用户等待决策`,
+          `[ClawMeeting] 会议「${title}」(${meetingId}) 第${roundCount}轮协商，已通知用户等待决策`,
         );
         continue;
       }
@@ -322,7 +322,7 @@ export default function register(api: any) {
       // ---- 未知类型：兜底通知（去重）----
       if (!notifiedMeetings.has(meetingId)) {
         notifiedMeetings.add(meetingId);
-        console.log(`[ClawSync] 未知任务类型「${title}」(${meetingId}) type=${taskType}`);
+        console.log(`[ClawMeeting] 未知任务类型「${title}」(${meetingId}) type=${taskType}`);
         notifications.push(`📋 会议「${title}」有新消息：${t.message ?? taskType}`);
       }
     }
@@ -334,7 +334,7 @@ export default function register(api: any) {
 
     // ==== 批量推送：所有通知合并为一条 sessions_send ====
     if (notifications.length > 0) {
-      const batchMessage = `[ClawSync 会议通知]\n\n${notifications.join("\n\n---\n\n")}`;
+      const batchMessage = `[ClawMeeting 会议通知]\n\n${notifications.join("\n\n---\n\n")}`;
       const pushed = await pushMessageToSession(batchMessage);
       if (!pushed) {
         // fallback: 放入 pendingNotifications，等用户下次交互时展示
@@ -372,7 +372,7 @@ export default function register(api: any) {
         return true;
       });
       if (newTasks.length > 0) {
-        console.log(`[ClawSync] 轮询发现 ${newTasks.length} 个新待办任务`);
+        console.log(`[ClawMeeting] 轮询发现 ${newTasks.length} 个新待办任务`);
       }
       return { ...(result as any), task_results: newTasks, pending_count: newTasks.length };
     },
@@ -387,7 +387,7 @@ export default function register(api: any) {
   // 11. 插件加载时：有 Token 立即启动轮询
   // ============================================================
   if (apiClient.getToken()) {
-    console.log("[ClawSync] 有已保存的 Token，立即启动轮询。");
+    console.log("[ClawMeeting] 有已保存的 Token，立即启动轮询。");
     pollingManager.start();
   }
 
@@ -395,15 +395,15 @@ export default function register(api: any) {
   // 12. registerService
   // ============================================================
   api.registerService?.({
-    id: "clawsync-polling",
+    id: "clawmeeting-polling",
     start: () => {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
-        console.log("[ClawSync] Service start: 启动轮询。");
+        console.log("[ClawMeeting] Service start: 启动轮询。");
         pollingManager.start();
       }
     },
     stop: () => {
-      console.log("[ClawSync] Service stop: 停止轮询。");
+      console.log("[ClawMeeting] Service stop: 停止轮询。");
       pollingManager.stop();
     },
   });
@@ -415,11 +415,11 @@ export default function register(api: any) {
     "after_agent_start",
     () => {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
-        console.log("[ClawSync] after_agent_start: 启动轮询。");
+        console.log("[ClawMeeting] after_agent_start: 启动轮询。");
         pollingManager.start();
       }
     },
-    { name: "clawsync.after-agent-start", description: "Gateway 就绪后启动轮询" },
+    { name: "clawmeeting.after-agent-start", description: "Gateway 就绪后启动轮询" },
   );
 
   api.registerHook?.(
@@ -427,7 +427,7 @@ export default function register(api: any) {
     () => {
       pollingManager.stop();
     },
-    { name: "clawsync.before-agent-stop", description: "Gateway 关闭前停止轮询" },
+    { name: "clawmeeting.before-agent-stop", description: "Gateway 关闭前停止轮询" },
   );
 
   // ============================================================
@@ -467,7 +467,7 @@ export default function register(api: any) {
         if (pendingDecisions.has(params.meeting_id)) {
           pendingDecisions.delete(params.meeting_id);
           savePendingDecisions([...pendingDecisions]);
-          console.log(`[ClawSync] 会议 ${params.meeting_id} 用户已决策，清除等待状态`);
+          console.log(`[ClawMeeting] 会议 ${params.meeting_id} 用户已决策，清除等待状态`);
         }
         // 也清除 submittedMeetings，允许新轮次重新自动提交
         submittedMeetings.delete(params.meeting_id);
@@ -492,12 +492,12 @@ export default function register(api: any) {
   api.registerCli?.(
     ({ program }: any) => {
       program
-        .command("clawsync-status")
-        .description("查看 ClawSync 插件状态")
+        .command("clawmeeting-status")
+        .description("查看 ClawMeeting 插件状态")
         .action(() => {
           const creds = loadCredentials();
           const session = loadSession();
-          console.log("=== ClawSync Meeting Negotiator ===");
+          console.log("=== ClawMeeting Meeting Negotiator ===");
           console.log(`服务端地址: ${pluginConfig.serverUrl}`);
           console.log(`轮询间隔: ${pluginConfig.pollingIntervalMs}ms`);
           console.log(`自动响应: ${pluginConfig.autoRespond ? "开启" : "关闭"}`);
@@ -512,7 +512,7 @@ export default function register(api: any) {
           }
         });
     },
-    { commands: ["clawsync-status"] },
+    { commands: ["clawmeeting-status"] },
   );
 
   // ============================================================
@@ -529,7 +529,7 @@ export default function register(api: any) {
       if (sessionKey && sessionKey !== sessionCtx?.sessionKey) {
         sessionCtx = { sessionKey, channel, peerId };
         saveSession(sessionCtx);
-        console.log(`[ClawSync] session 已更新: ${sessionKey}`);
+        console.log(`[ClawMeeting] session 已更新: ${sessionKey}`);
       }
 
       // System prompt 注入（用内存变量，避免每次读磁盘）
@@ -537,7 +537,7 @@ export default function register(api: any) {
 
       const systemPromptAddon = isBound
         ? [
-            "[ClawSync 会议助手已就绪]",
+            "[ClawMeeting 会议助手已就绪]",
             `当前绑定邮箱: ${savedCreds?.email ?? "未知"}，后台轮询运行中（自动处理会议邀请）。`,
             "",
             "用户可以直接说「帮我约某某开会」来发起会议协商，",
@@ -556,19 +556,21 @@ export default function register(api: any) {
             "请填写 preference_note 参数帮助协调方安排时间。没有相关记忆就不要填，绝对不要编造。",
             "",
             "后台行为说明：",
-            "- 收到 [ClawSync 会议邀请] 时，你需要根据对用户的记忆和日历选择空闲时间提交。",
+            "- 收到 [ClawMeeting 会议邀请] 时，你需要根据对用户的记忆和日历选择空闲时间提交。",
             "  记忆中不仅有偏好习惯，还可能有用户提到过的日程安排（出差、看病等），请一并避开。",
-            "  如果你不清楚用户的空闲时间，请询问用户。",
-            "- 收到协商通知 [ClawSync 协商通知] 时，说明协调方的妥协建议来了，",
+            "  请尽可能自己处理：即使日历没有连接，只要记忆中有任何关于用户日程的线索，",
+            "  就结合发起人提供的时间段自行选择合适时间并提交，不要反复确认。",
+            "  只有在既没有连接日历、记忆中也完全没有未来行程信息时，才询问用户。",
+            "- 收到协商通知 [ClawMeeting 协商通知] 时，说明协调方的妥协建议来了，",
             "  你需要将建议内容告知用户，并询问用户选择：",
             "  1. 接受建议 → 调用 check_and_respond_tasks，response_type='ACCEPT_PROPOSAL'",
             "  2. 提出新时间 → 让用户说出可用时间，你解析后调用 response_type='NEW_PROPOSAL' + available_slots",
             "  3. 拒绝 → 调用 response_type='REJECT'（会议将终止）",
-            "- 收到 [ClawSync 会议确认] 或 [ClawSync 协商失败] 消息时，",
+            "- 收到 [ClawMeeting 会议确认] 或 [ClawMeeting 协商失败] 消息时，",
             "  请用自然语言将会议信息完整地告知用户。",
           ].join("\n")
         : [
-            "[ClawSync 会议助手 - 需要初始化]",
+            "[ClawMeeting 会议助手 - 需要初始化]",
             "用户尚未绑定身份。请引导用户提供邮箱来完成绑定。",
           ].join("\n");
 
@@ -577,7 +579,7 @@ export default function register(api: any) {
       // fallback 通知（主动推送失败时才有内容）
       if (pendingNotifications.length > 0) {
         result.prependContext = [
-          "[ClawSync 重要通知]",
+          "[ClawMeeting 重要通知]",
           ...pendingNotifications,
         ].join("\n");
         pendingNotifications = [];
@@ -588,5 +590,5 @@ export default function register(api: any) {
     { priority: 5 },
   );
 
-  console.log("[ClawSync] ClawSync Meeting Negotiator 插件已加载。");
+  console.log("[ClawMeeting] ClawMeeting Meeting Negotiator 插件已加载。");
 }

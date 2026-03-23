@@ -1,5 +1,5 @@
 // ============================================================
-// ClawSync Plugin - API Client 工具层
+// ClawMeeting Plugin - API Client 工具层
 // 封装与中央协调端 (API Server) 的所有 HTTP 通信
 // 严格对齐 API_REFERENCE.md v1.0.0
 // ============================================================
@@ -17,7 +17,7 @@ import type {
   SubmitAvailabilityResponse,
 } from "../types/index.js";
 
-export class ClawSyncApiClient {
+export class ClawMeetingApiClient {
   private baseUrl: string;
   private token: string | null = null;
 
