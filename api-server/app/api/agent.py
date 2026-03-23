@@ -150,31 +150,24 @@ async def submit_coordination_result(
                 log.updated_at = datetime.utcnow()
 
         elif result.decision_status == DecisionStatus.NEGOTIATING:
-            # ====== 场景 B: 时间冲突 → NEGOTIATING → COLLECTING（多轮协商） ======
+            # ====== 场景 B: 需要协商 → ANALYZING → COLLECTING（重新收集） ======
             meeting.round_count += 1
 
             try:
-                # 第一步：ANALYZING → NEGOTIATING（验证轮次是否超限）
-                state_machine.transition(
+                # ANALYZING → COLLECTING（验证轮次是否超限）
+                new_state = state_machine.transition(
                     current=MeetingState.ANALYZING,
-                    target=MeetingState.NEGOTIATING,
+                    target=MeetingState.COLLECTING,
                     context={
                         "meeting_id": meeting_id,
                         "round_count": meeting.round_count
                     }
                 )
-
-                # 第二步：NEGOTIATING → COLLECTING（重新收集冲突用户的时间）
-                new_state = state_machine.transition(
-                    current=MeetingState.NEGOTIATING,
-                    target=MeetingState.COLLECTING,
-                    context={"meeting_id": meeting_id}
-                )
                 meeting.status = new_state.value  # COLLECTING
                 meeting.coordinator_reasoning = result.agent_reasoning
                 meeting.updated_at = datetime.utcnow()
                 target_emails_list = [p.target_email for p in result.counter_proposals]
-                state_logger.info(f"NEGOTIATING→COLLECTING | {meeting_id} | {meeting.title} | round={meeting.round_count} | targets={target_emails_list}")
+                state_logger.info(f"ANALYZING→COLLECTING | {meeting_id} | {meeting.title} | round={meeting.round_count} | targets={target_emails_list}")
 
                 # 构建需要重新提交的用户邮箱集合
                 target_emails = {p.target_email for p in result.counter_proposals}
@@ -193,7 +186,6 @@ async def submit_coordination_result(
                 # 只标记 counter_proposals 中的用户为需要操作
                 for email, log in email_to_log.items():
                     if email in target_emails:
-                        # 被 Agent 点名的用户：需要重新提交
                         log.action_required = True
                         proposal = next(
                             (p for p in result.counter_proposals if p.target_email == email),
@@ -206,7 +198,6 @@ async def submit_coordination_result(
                             log.counter_proposal_message = None
                             log.suggested_slots = None
                     else:
-                        # 未被点名的用户：不需要操作
                         log.action_required = False
                         log.counter_proposal_message = None
                         log.suggested_slots = None
@@ -236,25 +227,18 @@ async def submit_coordination_result(
 
         elif result.decision_status == DecisionStatus.FAILED:
             # ====== 场景 C: 彻底失败 → FAILED ======
-            # 防护：如果是第一轮（round_count==0），不允许直接 FAILED，强制转为 NEGOTIATING
-            # 确保用户至少有一次协商机会
+            # 防护：如果是第一轮（round_count==0），强制转为 COLLECTING 给用户协商机会
             if meeting.round_count == 0:
                 state_logger.info(
                     f"GUARD | {meeting_id} | {meeting.title} | "
-                    f"Agent 在第一轮就返回 FAILED，强制转为 NEGOTIATING 给用户协商机会"
+                    f"Agent 在第一轮就返回 FAILED，强制转为 COLLECTING 给用户协商机会"
                 )
-                # 复用 NEGOTIATING 逻辑：round_count+1，通知所有人重新提交
                 meeting.round_count += 1
                 try:
-                    state_machine.transition(
-                        current=MeetingState.ANALYZING,
-                        target=MeetingState.NEGOTIATING,
-                        context={"meeting_id": meeting_id, "round_count": meeting.round_count}
-                    )
                     new_state = state_machine.transition(
-                        current=MeetingState.NEGOTIATING,
+                        current=MeetingState.ANALYZING,
                         target=MeetingState.COLLECTING,
-                        context={"meeting_id": meeting_id}
+                        context={"meeting_id": meeting_id, "round_count": meeting.round_count}
                     )
                     meeting.status = new_state.value
                     meeting.coordinator_reasoning = f"时间存在冲突，请各方调整。Agent 分析：{result.agent_reasoning}"
@@ -277,11 +261,11 @@ async def submit_coordination_result(
                     db.commit()
                     return APIResponse(
                         code=200,
-                        message="第一轮分析无法确认，已转为协商模式，等待各方重新提交时间",
+                        message="第一轮分析无法确认，等待各方重新提交时间",
                         data={"meeting_id": meeting_id, "new_status": meeting.status}
                     )
                 except ValueError:
-                    pass  # 轮次超限，继续走下面的 FAILED 逻辑
+                    pass  # 轮次超限，继续走 FAILED 逻辑
 
             new_state = state_machine.transition(
                 current=MeetingState.ANALYZING,

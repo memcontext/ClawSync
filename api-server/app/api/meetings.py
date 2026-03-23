@@ -230,8 +230,8 @@ async def submit_availability(
 
         current_state = MeetingState(meeting.status)
 
-        # COLLECTING/NEGOTIATING 允许提交时间，FAILED 允许发起人取消(REJECT)或重新发起
-        allowed_states = (MeetingState.COLLECTING, MeetingState.NEGOTIATING, MeetingState.FAILED)
+        # COLLECTING 允许提交时间，FAILED 允许发起人取消(REJECT)或重新发起
+        allowed_states = (MeetingState.COLLECTING, MeetingState.FAILED)
         if current_state not in allowed_states:
             raise HTTPException(
                 status_code=400,
