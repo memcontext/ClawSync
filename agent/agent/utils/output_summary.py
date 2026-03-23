@@ -387,6 +387,30 @@ def summarize_meeting(
             "counter_proposals": [],
         }
 
+    # ── FAILED：有参与者拒绝 ──────────────────────────────────────────────────
+    if participants_info:
+        rejected = [
+            p for p in participants_info
+            if (p.get("preference_note") or "").startswith("[已拒绝]")
+        ]
+        if rejected:
+            emails = [p.get("email", "unknown") for p in rejected]
+            reasons = [
+                (p.get("preference_note") or "").replace("[已拒绝] ", "")
+                for p in rejected
+            ]
+            detail = "、".join(
+                f"{e}（{r}）" if r else e
+                for e, r in zip(emails, reasons)
+            )
+            logger.info("有参与者拒绝，直接 FAILED: %s", detail)
+            return {
+                "decision_status": "FAILED",
+                "final_time": None,
+                "agent_reasoning": f"参与者 {detail} 拒绝了会议邀请，无法继续协商。",
+                "counter_proposals": [],
+            }
+
     path = _score_file(meeting_id)
     if not path.exists():
         raise FileNotFoundError(
