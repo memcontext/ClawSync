@@ -469,8 +469,11 @@ export default function register(api: any) {
           savePendingDecisions([...pendingDecisions]);
           console.log(`[ClawMeeting] 会议 ${params.meeting_id} 用户已决策，清除等待状态`);
         }
-        // 也清除 submittedMeetings，允许新轮次重新自动提交
-        submittedMeetings.delete(params.meeting_id);
+        // 只在用户主动决策（非首次提交）时清除 submittedMeetings，允许新轮次重新自动提交
+        // INITIAL 提交后不清除，否则会议仍在 COLLECTING 状态时轮询会重复推送
+        if (params.response_type !== "INITIAL") {
+          submittedMeetings.delete(params.meeting_id);
+        }
       }
 
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
