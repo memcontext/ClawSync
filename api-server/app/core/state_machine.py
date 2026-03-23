@@ -11,6 +11,7 @@ class MeetingState(str, Enum):
     NEGOTIATING = "NEGOTIATING"
     CONFIRMED = "CONFIRMED"
     FAILED = "FAILED"
+    OVER = "OVER"           # 会议结束，通知被邀请人最终结果
 
 
 class StateMachine:
@@ -23,8 +24,9 @@ class StateMachine:
             MeetingState.COLLECTING: [MeetingState.ANALYZING, MeetingState.NEGOTIATING, MeetingState.FAILED],
             MeetingState.ANALYZING: [MeetingState.CONFIRMED, MeetingState.NEGOTIATING, MeetingState.FAILED],
             MeetingState.NEGOTIATING: [MeetingState.COLLECTING, MeetingState.ANALYZING, MeetingState.FAILED],
-            MeetingState.CONFIRMED: [],
-            MeetingState.FAILED: []
+            MeetingState.CONFIRMED: [MeetingState.OVER],
+            MeetingState.FAILED: [MeetingState.OVER],
+            MeetingState.OVER: []
         }
 
     def can_transition(self, current: MeetingState, target: MeetingState) -> bool:

@@ -276,20 +276,32 @@ async def submit_availability(
             meeting.updated_at = datetime.utcnow()
             state_logger.info(f"REJECTED→FAILED | {meeting_id} | {meeting.title} | by={current_user.email} | reason={reject_reason}")
 
-            # 通知所有其他参与者会议已失败
+            # 分角色通知：发起人收到 FAILED，其他被邀请人收到 OVER，拒绝者不收通知
             all_logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             for log in all_logs:
-                if log.user_id != current_user.id:
+                if log.user_id == current_user.id:
+                    # 拒绝者本人：不收通知
+                    continue
+                elif log.user_id == meeting.initiator_id:
+                    # 发起人：收到 FAILED 通知
                     log.action_required = True
                     log.counter_proposal_message = (
-                        f"❌ 会议协商失败\n"
+                        f"❌ 协商失败\n"
                         f"会议：{meeting.title}\n"
                         f"原因：{reject_reason}\n"
                         f"如需重新发起，请创建新的会议。"
                     )
-                    log.updated_at = datetime.utcnow()
+                else:
+                    # 其他被邀请人：收到 OVER 通知
+                    log.action_required = True
+                    log.counter_proposal_message = (
+                        f"📋 会议已结束\n"
+                        f"会议：{meeting.title}\n"
+                        f"结果：有参与者无法参加，会议已取消"
+                    )
+                log.updated_at = datetime.utcnow()
 
             db.commit()
 

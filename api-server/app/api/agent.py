@@ -134,19 +134,29 @@ async def submit_coordination_result(
             meeting.updated_at = datetime.utcnow()
             state_logger.info(f"CONFIRMED | {meeting_id} | {meeting.title} | final_time={result.final_time}")
 
-            # 给所有参与者生成 CONFIRMED 通知（action_required=True 让 Plugin 轮询能看到）
+            # 分角色通知：发起人收到 CONFIRMED，被邀请人收到 OVER
             logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             for log in logs:
                 log.action_required = True
-                log.counter_proposal_message = (
-                    f"✅ 会议已确认！\n"
-                    f"会议：{meeting.title}\n"
-                    f"时间：{result.final_time}\n"
-                    f"时长：{meeting.duration_minutes} 分钟\n"
-                    f"请确认是否可以参加。"
-                )
+                if log.user_id == meeting.initiator_id:
+                    # 发起人：CONFIRMED 通知
+                    log.counter_proposal_message = (
+                        f"✅ 会议已确认！\n"
+                        f"会议：{meeting.title}\n"
+                        f"时间：{result.final_time}\n"
+                        f"时长：{meeting.duration_minutes} 分钟"
+                    )
+                else:
+                    # 被邀请人：OVER 通知（含最终时间，供确认）
+                    log.counter_proposal_message = (
+                        f"📋 会议已确定\n"
+                        f"会议：{meeting.title}\n"
+                        f"时间：{result.final_time}\n"
+                        f"时长：{meeting.duration_minutes} 分钟\n"
+                        f"请确认是否可以参加。"
+                    )
                 log.updated_at = datetime.utcnow()
 
         elif result.decision_status == DecisionStatus.NEGOTIATING:
@@ -233,12 +243,19 @@ async def submit_coordination_result(
 
                 for log in logs:
                     log.action_required = True
-                    log.counter_proposal_message = (
-                        f"❌ 会议协商失败\n"
-                        f"会议：{meeting.title}\n"
-                        f"原因：已达最大协商轮数限制\n"
-                        f"如需重新发起，请创建新的会议。"
-                    )
+                    if log.user_id == meeting.initiator_id:
+                        log.counter_proposal_message = (
+                            f"❌ 协商失败\n"
+                            f"会议：{meeting.title}\n"
+                            f"原因：已达最大协商轮数限制\n"
+                            f"如需重新发起，请创建新的会议。"
+                        )
+                    else:
+                        log.counter_proposal_message = (
+                            f"📋 会议已结束\n"
+                            f"会议：{meeting.title}\n"
+                            f"结果：协商未能达成，会议已取消"
+                        )
                     log.suggested_slots = None
                     log.updated_at = datetime.utcnow()
 
@@ -303,18 +320,25 @@ async def submit_coordination_result(
             meeting.coordinator_reasoning = result.agent_reasoning
             meeting.updated_at = datetime.utcnow()
 
-            # 给所有参与者生成 FAILED 通知
+            # 分角色通知：发起人收到 FAILED，被邀请人收到 OVER
             logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             for log in logs:
                 log.action_required = True
-                log.counter_proposal_message = (
-                    f"❌ 会议协商失败\n"
-                    f"会议：{meeting.title}\n"
-                    f"原因：{result.agent_reasoning}\n"
-                    f"如需重新发起，请创建新的会议。"
-                )
+                if log.user_id == meeting.initiator_id:
+                    log.counter_proposal_message = (
+                        f"❌ 协商失败\n"
+                        f"会议：{meeting.title}\n"
+                        f"原因：{result.agent_reasoning}\n"
+                        f"如需重新发起，请创建新的会议。"
+                    )
+                else:
+                    log.counter_proposal_message = (
+                        f"📋 会议已结束\n"
+                        f"会议：{meeting.title}\n"
+                        f"结果：协商未能达成，会议已取消"
+                    )
                 log.updated_at = datetime.utcnow()
 
         db.commit()
