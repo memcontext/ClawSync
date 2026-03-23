@@ -335,6 +335,28 @@ export function createCheckAndRespondTasksHandler(
               instruction: "会议协商失败。请将 display_to_user 的内容完整展示给用户。",
             });
             break;
+          case "MEETING_CONFIRMED":
+            results.push({
+              meeting_id: task.meeting_id,
+              title: task.title,
+              action: "NOTIFY_USER",
+              task_type: task.task_type,
+              initiator: task.initiator,
+              message: task.message,
+              instruction: "会议已确认，请将最终时间通知用户。",
+            });
+            break;
+          case "MEETING_FAILED":
+            results.push({
+              meeting_id: task.meeting_id,
+              title: task.title,
+              action: "NOTIFY_USER",
+              task_type: task.task_type,
+              initiator: task.initiator,
+              message: task.message,
+              instruction: "会议协商失败，请通知用户。",
+            });
+            break;
           default:
             console.log(
               `[ClawSync] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}`,
