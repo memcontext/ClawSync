@@ -59,6 +59,58 @@ class CoordinatorResult(BaseModel):
             raise ValueError(f"final_time 格式错误：{v!r}，应为 YYYY-MM-DD HH:MM-HH:MM")
         return v
 
+# ─── 会议结构变更检测 ─────────────────────────────────────────────────────────
+
+def _detect_structural_changes(participants_info: list[dict]) -> str | None:
+    """
+    用 LLM 检测 preference_note 中是否包含会议结构调整建议。
+    如修改时长、拆分会议、增减参会人等。只关注非拒绝用户的 preference_note。
+    返回变更描述（str）或 None。
+    """
+    notes = []
+    for p in participants_info:
+        note = (p.get("preference_note") or "").strip()
+        if not note or note.startswith("[已拒绝]"):
+            continue
+        email = p.get("email", "unknown")
+        notes.append(f"{email}: {note}")
+
+    if not notes:
+        return None
+
+    llm = ChatOpenAI(
+        model=DOUBAO_MODEL,
+        api_key=DOUBAO_API_KEY,
+        base_url=DOUBAO_BASE_URL,
+        temperature=0,
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", (
+            "你是一个会议协调助手。判断以下参与者备注中是否有人提出了会议结构调整建议。\n"
+            "会议结构调整包括但不限于：\n"
+            "  - 修改会议时长（如「建议改成30分钟」「时间太长了」）\n"
+            "  - 拆分为多次会议（如「建议分两次开」）\n"
+            "  - 增减参会人员（如「建议也叫上某某」「我可以不参加」）\n"
+            "  - 改变会议形式（如「建议改成线上」「改成邮件沟通」）\n\n"
+            "纯时间偏好（如「我更喜欢下午」「周五不方便」）不算结构调整。\n\n"
+            "如果检测到结构调整建议，输出一行简短描述（如「bob@x.com 建议将时长改为30分钟」）。\n"
+            "如果没有，只输出：无"
+        )),
+        ("human", "参与者备注：\n{notes}"),
+    ])
+
+    try:
+        result = (prompt | llm).invoke({"notes": "\n".join(notes)})
+        answer = result.content.strip()
+        if answer == "无" or not answer:
+            return None
+        return answer
+    except Exception as e:
+        logger.warning("结构变更检测 LLM 调用失败，跳过: %s", e)
+        return None
+
+
 # ─── 时间块查找 ───────────────────────────────────────────────────────────────
 
 def _get_initiator_slots(meeting_id: str, initiator_id: str) -> dict[str, bool]:
@@ -408,6 +460,18 @@ def summarize_meeting(
                 "decision_status": "FAILED",
                 "final_time": None,
                 "agent_reasoning": f"参与者 {detail} 拒绝了会议邀请，无法继续协商。",
+                "counter_proposals": [],
+            }
+
+    # ── FAILED：参与者提出更改会议结构（时长、拆分、人员等） ─────────────────
+    if participants_info:
+        structural_changes = _detect_structural_changes(participants_info)
+        if structural_changes:
+            logger.info("检测到会议结构变更请求，直接 FAILED: %s", structural_changes)
+            return {
+                "decision_status": "FAILED",
+                "final_time": None,
+                "agent_reasoning": f"有参与者提出了会议结构调整建议，当前会议设置需要发起人重新确认：{structural_changes}",
                 "counter_proposals": [],
             }
 
