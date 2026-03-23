@@ -521,15 +521,27 @@ export default function register(api: any) {
   api.on?.(
     "before_prompt_build",
     (event: any, ctx: any) => {
-      // Session 捕获
+      // Session 捕获（只捕获主 session，过滤 cron/sub-agent/run 等临时 session）
       const sessionKey = event?.sessionKey ?? event?.session?.key
         ?? ctx?.sessionKey ?? ctx?.session?.key;
       const channel = event?.channel ?? ctx?.channel;
       const peerId = event?.peerId ?? event?.peer?.id ?? ctx?.peerId ?? ctx?.peer?.id;
-      if (sessionKey && sessionKey !== sessionCtx?.sessionKey) {
+
+      // 判断是否为主 session：排除 cron、subagent、run 等临时 session
+      const isMainSession = sessionKey
+        && !sessionKey.includes(":cron:")
+        && !sessionKey.includes(":run:")
+        && !sessionKey.includes(":subagent:");
+
+      if (isMainSession && sessionKey !== sessionCtx?.sessionKey) {
         sessionCtx = { sessionKey, channel, peerId };
         saveSession(sessionCtx);
         console.log(`[ClawSync] session 已更新: ${sessionKey}`);
+      }
+
+      // 非主 session 不注入 system prompt，节省 token
+      if (!isMainSession) {
+        return {};
       }
 
       // System prompt 注入（用内存变量，避免每次读磁盘）
