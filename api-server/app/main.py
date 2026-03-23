@@ -87,6 +87,13 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             except:
                 body_summary = "(无法解析)"
 
+        # 重置请求体流，确保后续路由能读取到 body
+        if method in ("POST", "PUT"):
+            _body = body if 'body' in locals() else b""
+            async def receive():
+                return {"type": "http.request", "body": _body}
+            request._receive = receive
+
         response = await call_next(request)
         duration = round((time.time() - start_time) * 1000)  # 毫秒
 

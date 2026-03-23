@@ -7,6 +7,15 @@ class UserCreate(BaseModel):
     email: EmailStr
 
 
+class SendCodeRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyBindRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
 class ResponseType(str, Enum):
     """提交响应类型"""
     INITIAL = "INITIAL"
