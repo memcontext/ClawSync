@@ -264,9 +264,9 @@ export default function register(api: any) {
           `[ClawSync 会议邀请]`,
           `会议：「${title}」`,
           `会议 ID：${meetingId}`,
+          `会议号：${generateMeetingNumber(meetingId)}`,
           `发起人：${t.initiator ?? "未知"}`,
           `时长：${t.duration_minutes ?? "未知"} 分钟`,
-          ...(t.message ? [`消息：${t.message}`] : []),
         ];
 
         // 拉取会议详情，附上发起人已提交的时间段，让 Agent 可以选重叠时间
