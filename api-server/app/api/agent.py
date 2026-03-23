@@ -227,46 +227,6 @@ async def submit_coordination_result(
 
         elif result.decision_status == DecisionStatus.FAILED:
             # ====== 场景 C: 彻底失败 → FAILED ======
-            # 防护：如果是第一轮（round_count==0），强制转为 COLLECTING 给用户协商机会
-            if meeting.round_count == 0:
-                state_logger.info(
-                    f"GUARD | {meeting_id} | {meeting.title} | "
-                    f"Agent 在第一轮就返回 FAILED，强制转为 COLLECTING 给用户协商机会"
-                )
-                meeting.round_count += 1
-                try:
-                    new_state = state_machine.transition(
-                        current=MeetingState.ANALYZING,
-                        target=MeetingState.COLLECTING,
-                        context={"meeting_id": meeting_id, "round_count": meeting.round_count}
-                    )
-                    meeting.status = new_state.value
-                    meeting.coordinator_reasoning = f"时间存在冲突，请各方调整。Agent 分析：{result.agent_reasoning}"
-                    meeting.updated_at = datetime.utcnow()
-
-                    logs = db.query(NegotiationLog).filter(
-                        NegotiationLog.meeting_id == meeting_id
-                    ).all()
-                    for log in logs:
-                        log.action_required = True
-                        log.counter_proposal_message = (
-                            f"⚠️ 时间冲突，需要协商\n"
-                            f"会议：{meeting.title}\n"
-                            f"原因：{result.agent_reasoning}\n"
-                            f"请重新提供您的空闲时间。"
-                        )
-                        log.suggested_slots = None
-                        log.updated_at = datetime.utcnow()
-
-                    db.commit()
-                    return APIResponse(
-                        code=200,
-                        message="第一轮分析无法确认，等待各方重新提交时间",
-                        data={"meeting_id": meeting_id, "new_status": meeting.status}
-                    )
-                except ValueError:
-                    pass  # 轮次超限，继续走 FAILED 逻辑
-
             new_state = state_machine.transition(
                 current=MeetingState.ANALYZING,
                 target=MeetingState.FAILED,
