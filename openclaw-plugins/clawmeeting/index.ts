@@ -284,7 +284,32 @@ export default function register(api: any) {
         continue;
       }
 
-      // ---- 其它类型（CONFIRMED/FAILED/OVER 等）：纯通知，展示 message 内容 ----
+      // ---- MEETING_FAILED：需要发起人决策（取消 or 重新发起）----
+      if (taskType === "MEETING_FAILED") {
+        if (pendingDecisions.has(meetingId)) continue;
+
+        pendingDecisions.add(meetingId);
+        savePendingDecisions([...pendingDecisions]);
+
+        const notifyLines = [
+          `[ClawMeeting 协商失败]`,
+          `会议：「${title}」`,
+          `会议 ID：${meetingId}`,
+          `会议号：${generateMeetingNumber(meetingId)}`,
+          `${t.message ?? "会议协商失败。"}`,
+          "",
+          "请告知用户以上信息，并询问用户：",
+          "1. 取消会议（调用 check_and_respond_tasks，response_type='REJECT'）",
+          "2. 调整时间后重新发起（用户说出新的可用时间，调用 check_and_respond_tasks，response_type='NEW_PROPOSAL' + available_slots）",
+        ];
+        notifications.push(notifyLines.join("\n"));
+        console.log(
+          `[ClawMeeting] 会议「${title}」(${meetingId}) 协商失败，等待发起人决策`,
+        );
+        continue;
+      }
+
+      // ---- 其它类型（CONFIRMED/OVER 等）：纯通知，展示 message 内容 ----
       if (notifiedMeetings.has(meetingId)) continue;
       notifiedMeetings.add(meetingId);
       notifications.push(buildNotification(t));
@@ -321,9 +346,13 @@ export default function register(api: any) {
       const taskResults = (result as any).task_results ?? [];
       const newTasks = taskResults.filter((t: any) => {
         const tt = t.task_type;
-        // CONFIRMED/FAILED：通知去重
-        if (tt === "MEETING_CONFIRMED" || tt === "MEETING_FAILED") {
+        // CONFIRMED：纯通知去重
+        if (tt === "MEETING_CONFIRMED") {
           return !notifiedMeetings.has(t.meeting_id);
+        }
+        // FAILED：需要发起人决策，用 pendingDecisions 去重
+        if (tt === "MEETING_FAILED") {
+          return !pendingDecisions.has(t.meeting_id);
         }
         // INITIAL_SUBMIT：已提交过的不再重试
         if (tt === "INITIAL_SUBMIT") {
@@ -546,7 +575,10 @@ export default function register(api: any) {
             "  1. 接受建议 → 调用 check_and_respond_tasks，response_type='ACCEPT_PROPOSAL'",
             "  2. 提出新时间 → 让用户说出可用时间，你解析后调用 response_type='NEW_PROPOSAL' + available_slots",
             "  3. 拒绝 → 调用 response_type='REJECT'（记录拒绝，不会立即终止会议）",
-            "- 收到 [ClawMeeting 会议通知] 消息时（会议确认、失败、取消、结束等），",
+            "- 收到 [ClawMeeting 协商失败] 时，将失败详情告知用户（发起人），并询问：",
+            "  1. 取消会议 → 调用 check_and_respond_tasks，response_type='REJECT'",
+            "  2. 调整时间重新发起 → 用户说出新时间，调用 response_type='NEW_PROPOSAL' + available_slots",
+            "- 收到 [ClawMeeting 会议通知] 消息时（会议确认、取消、结束等），",
             "  请用自然语言将通知内容完整地告知用户。",
           ].join("\n")
         : [
