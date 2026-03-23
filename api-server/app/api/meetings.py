@@ -7,7 +7,10 @@ from ..models.schemas import MeetingCreate, SubmitAvailabilityRequest, APIRespon
 from ..utils.deps import get_db, get_current_user
 from ..utils.token import generate_meeting_id
 from ..core.state_machine import StateMachine, MeetingState
+import logging
+
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
+state_logger = logging.getLogger("state")
 
 # 全局实例
 state_machine = StateMachine(max_rounds=3)
@@ -75,6 +78,7 @@ async def create_meeting(
             context={"meeting_id": meeting_id}
         )
         new_meeting.status = new_state.value
+        state_logger.info(f"CREATED→COLLECTING | {meeting_id} | {meeting_data.title} | initiator={current_user.email} | invitees={meeting_data.invitees}")
 
         db.commit()
 
@@ -270,6 +274,7 @@ async def submit_availability(
             meeting.status = fail_state.value
             meeting.coordinator_reasoning = f"协商失败：{reject_reason}"
             meeting.updated_at = datetime.utcnow()
+            state_logger.info(f"REJECTED→FAILED | {meeting_id} | {meeting.title} | by={current_user.email} | reason={reject_reason}")
 
             # 通知所有其他参与者会议已失败
             all_logs = db.query(NegotiationLog).filter(
@@ -392,4 +397,5 @@ def _transition_to_analyzing(meeting: Meeting, current_state: MeetingState, db: 
     )
     meeting.status = new_state.value
     meeting.updated_at = datetime.utcnow()
+    state_logger.info(f"{current_state.value}→ANALYZING | {meeting.id} | {meeting.title} | 全员已提交")
     db.commit()
