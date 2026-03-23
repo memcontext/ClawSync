@@ -363,6 +363,57 @@ async def submit_availability(
 
         else:
             # ====== INITIAL / NEW_PROPOSAL：提交时间数据 ======
+
+            # FAILED 状态下发起人重新发起 → FAILED → COLLECTING
+            if current_state == MeetingState.FAILED and current_user.id == meeting.initiator_id:
+                new_state = state_machine.transition(
+                    current=MeetingState.FAILED,
+                    target=MeetingState.COLLECTING,
+                    context={"meeting_id": meeting_id}
+                )
+                meeting.status = new_state.value
+                meeting.updated_at = datetime.utcnow()
+                state_logger.info(
+                    f"FAILED→COLLECTING | {meeting_id} | {meeting.title} | 发起人重新发起"
+                )
+
+                # 更新发起人的时间
+                negotiation_log.latest_slots = submit_data.available_slots
+                if submit_data.preference_note:
+                    negotiation_log.preference_note = submit_data.preference_note
+                negotiation_log.action_required = False
+                negotiation_log.counter_proposal_message = None
+                negotiation_log.updated_at = datetime.utcnow()
+
+                # 重置所有被邀请人为待提交
+                all_logs = db.query(NegotiationLog).filter(
+                    NegotiationLog.meeting_id == meeting_id
+                ).all()
+                for log in all_logs:
+                    if log.user_id != current_user.id:
+                        log.action_required = True
+                        log.latest_slots = []
+                        log.counter_proposal_message = (
+                            f"📋 会议重新发起\n"
+                            f"会议：{meeting.title}\n"
+                            f"发起人调整了时间，请重新提交您的空闲时间。"
+                        )
+                        log.suggested_slots = None
+                        log.updated_at = datetime.utcnow()
+
+                db.commit()
+                return APIResponse(
+                    code=200,
+                    message="会议已重新发起，等待参与者重新提交时间",
+                    data={
+                        "id": meeting_id, "meeting_id": meeting_id,
+                        "response_type": submit_data.response_type.value,
+                        "status": meeting.status,
+                        "all_submitted": False,
+                    }
+                )
+
+            # 正常 COLLECTING 阶段提交
             negotiation_log.latest_slots = submit_data.available_slots
             if submit_data.preference_note:
                 negotiation_log.preference_note = submit_data.preference_note
