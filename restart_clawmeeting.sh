@@ -1,15 +1,15 @@
 #!/bin/bash
 # =========================================
-# ClawSync 一键重启脚本（XShell 适用）
+# ClawMeeting 一键重启脚本（XShell 适用）
 # =========================================
 # 用法:
-#   bash restart_clawsync.sh          普通重启（保留数据库）
-#   bash restart_clawsync.sh --clean  清库重启（删除数据库重建）
-#   bash restart_clawsync.sh --pull   拉取最新代码并重启
-#   bash restart_clawsync.sh --all    拉取代码 + 清库 + 重启
+#   bash restart_clawmeeting.sh          普通重启（保留数据库）
+#   bash restart_clawmeeting.sh --clean  清库重启（删除数据库重建）
+#   bash restart_clawmeeting.sh --pull   拉取最新代码并重启
+#   bash restart_clawmeeting.sh --all    拉取代码 + 清库 + 重启
 # =========================================
 
-BASE_DIR="/home/deploy/ClawSync"
+BASE_DIR="/home/deploy/ClawMeeting"
 API_DIR="$BASE_DIR/api-server"
 AGENT_DIR="$BASE_DIR/agent/agent"
 API_PORT=7010
@@ -17,7 +17,7 @@ AGENT_PORT=8001
 
 echo ""
 echo "========================================="
-echo "  ClawSync 服务管理脚本"
+echo "  ClawMeeting 服务管理脚本"
 echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================="
 

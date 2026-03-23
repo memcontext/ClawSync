@@ -1,6 +1,6 @@
-# ClawSync Coordinator Agent
+# ClawMeeting Coordinator Agent
 
-会议时间协调 Agent —— ClawSync 系统的核心决策组件。
+会议时间协调 Agent —— ClawMeeting 系统的核心决策组件。
 
 Agent 通过轮询 API Server 获取待分析的会议任务，基于所有参与者的时间数据进行冲突分析和最优时间推荐，将决策结果提交回服务端，驱动会议协商流程。
 

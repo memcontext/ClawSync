@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ClawSync 测试客户端 — 供测试人员在本地连接服务器进行插件功能测试
+ClawMeeting 测试客户端 — 供测试人员在本地连接服务器进行插件功能测试
 
 使用方法:
     python test_client.py                        # 交互式菜单
@@ -345,7 +345,7 @@ class TestClient:
     def run(self):
         """主循环"""
         print(f"\n{'='*60}")
-        print(f"  ClawSync 测试客户端")
+        print(f"  ClawMeeting 测试客户端")
         print(f"  服务器: {self.server_url}")
         print(f"{'='*60}\n")
 
@@ -397,7 +397,7 @@ class TestClient:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ClawSync 测试客户端")
+    parser = argparse.ArgumentParser(description="ClawMeeting 测试客户端")
     parser.add_argument("--server", default=DEFAULT_SERVER, help=f"服务器地址 (默认: {DEFAULT_SERVER})")
     args = parser.parse_args()
 
