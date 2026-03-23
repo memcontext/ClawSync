@@ -99,6 +99,12 @@ export const checkAndRespondTasksSchema = {
 
 // ---- 内部: 构建 INITIAL_SUBMIT 任务的返回信息 ----
 function buildInitialSubmitInfo(task: PendingTask): object {
+  // 构建发起人时间展示文本
+  const initiatorSlots = (task as any).initiator_slots ?? [];
+  const slotsDisplay = initiatorSlots.length > 0
+    ? `发起人提议的时间段：${initiatorSlots.join("、")}`
+    : "发起人未提供具体时间段";
+
   return {
     meeting_id: task.meeting_id,
     title: task.title,
@@ -107,10 +113,19 @@ function buildInitialSubmitInfo(task: PendingTask): object {
     initiator: task.initiator,
     duration_minutes: task.duration_minutes ?? null,
     round_count: task.round_count ?? 0,
+    initiator_slots: initiatorSlots,
     server_message: task.message,
+    display_to_user: [
+      `📅 收到会议邀请「${task.title}」`,
+      `发起人：${task.initiator}`,
+      `时长：${task.duration_minutes ?? "未知"} 分钟`,
+      slotsDisplay,
+      "请告诉我你哪些时间段有空，我帮你提交。",
+    ].join("\n"),
     instruction: [
       "收到会议邀请，需要提交空闲时间。",
-      "请根据你对用户的记忆和用户的日历，选择合适的空闲时间段。",
+      "【重要】请先将 display_to_user 的内容展示给用户，包括发起人提议的时间段。",
+      "然后根据你对用户的记忆和用户的日历，选择合适的空闲时间段。",
       "记忆中不仅有开会偏好和习惯，还可能有用户提到过的日程安排",
       "（如出差、看病、接送孩子、约饭等），这些未必在日历上，请一并考虑避开。",
       "然后调用本工具提交：meeting_id、response_type='INITIAL'、available_slots。",
@@ -121,6 +136,11 @@ function buildInitialSubmitInfo(task: PendingTask): object {
 
 // ---- 内部: 构建 COUNTER_PROPOSAL 任务的返回信息 ----
 function buildCounterProposalInfo(task: PendingTask): object {
+  const suggestedSlots = (task as any).suggested_slots ?? [];
+  const slotsText = suggestedSlots.length > 0
+    ? `建议时间段：${suggestedSlots.join("、")}`
+    : "";
+
   return {
     meeting_id: task.meeting_id,
     title: task.title,
@@ -129,10 +149,18 @@ function buildCounterProposalInfo(task: PendingTask): object {
     initiator: task.initiator,
     duration_minutes: task.duration_minutes ?? null,
     round_count: task.round_count ?? 0,
+    suggested_slots: suggestedSlots,
     coordinator_message: task.message,
+    display_to_user: [
+      `🔄 会议「${task.title}」需要协商（第 ${task.round_count ?? 0} 轮）`,
+      `协调建议：${task.message}`,
+      slotsText,
+      "",
+      "你可以选择：接受建议 / 提交新时间 / 拒绝会议",
+    ].filter(Boolean).join("\n"),
     instruction: [
       "协调方发来了协商建议，需要用户决策。",
-      "请将 coordinator_message 内容告知用户，",
+      "【重要】请先将 display_to_user 的内容展示给用户，包括建议的时间段。",
       "结合你对用户的记忆（偏好习惯及用户提到过的日程安排）和用户日历情况供参考。",
       "然后等用户决定：",
       "  - 用户同意建议 → 调用本工具，meeting_id + response_type='ACCEPT_PROPOSAL'",
@@ -235,11 +263,77 @@ export function createCheckAndRespondTasksHandler(
 
       for (const task of pending_tasks) {
         switch (task.task_type) {
-          case "INITIAL_SUBMIT":
-            results.push(buildInitialSubmitInfo(task));
+          case "INITIAL_SUBMIT": {
+            // Plugin 团队方案：额外调 getMeetingDetail 获取所有参与者的 latest_slots
+            let meetingDetail: any = null;
+            try {
+              meetingDetail = await apiClient.getMeetingDetail(task.meeting_id);
+            } catch (e) {
+              console.log(`[ClawSync] 拉详情失败，退化为基础信息: ${e}`);
+            }
+
+            const info = buildInitialSubmitInfo(task) as any;
+
+            if (meetingDetail?.participants) {
+              // 把已提交方的 latest_slots 塞进返回值，agent 可以更智能地选重叠时间
+              info.participants_slots = meetingDetail.participants
+                .filter((p: any) => p.latest_slots && p.latest_slots.length > 0)
+                .map((p: any) => ({
+                  email: p.email,
+                  role: p.role,
+                  latest_slots: p.latest_slots,
+                }));
+            }
+
+            results.push(info);
             break;
-          case "COUNTER_PROPOSAL":
-            results.push(buildCounterProposalInfo(task));
+          }
+          case "COUNTER_PROPOSAL": {
+            // Plugin 团队方案：额外调 getMeetingDetail 获取协调推理和各方时间
+            let meetingDetail: any = null;
+            try {
+              meetingDetail = await apiClient.getMeetingDetail(task.meeting_id);
+            } catch (e) {
+              console.log(`[ClawSync] 拉详情失败，退化为基础信息: ${e}`);
+            }
+
+            const info = buildCounterProposalInfo(task) as any;
+
+            if (meetingDetail) {
+              info.coordinator_reasoning = meetingDetail.coordinator_reasoning ?? null;
+              info.participants_slots = (meetingDetail.participants ?? [])
+                .filter((p: any) => p.latest_slots && p.latest_slots.length > 0)
+                .map((p: any) => ({
+                  email: p.email,
+                  role: p.role,
+                  latest_slots: p.latest_slots,
+                }));
+            }
+
+            results.push(info);
+            break;
+          }
+          case "MEETING_CONFIRMED":
+            results.push({
+              meeting_id: task.meeting_id,
+              title: task.title,
+              action: "NOTIFY_USER",
+              task_type: "MEETING_CONFIRMED",
+              initiator: task.initiator,
+              display_to_user: task.message,
+              instruction: "会议已确认！请将 display_to_user 的内容完整展示给用户。",
+            });
+            break;
+          case "MEETING_FAILED":
+            results.push({
+              meeting_id: task.meeting_id,
+              title: task.title,
+              action: "NOTIFY_USER",
+              task_type: "MEETING_FAILED",
+              initiator: task.initiator,
+              display_to_user: task.message,
+              instruction: "会议协商失败。请将 display_to_user 的内容完整展示给用户。",
+            });
             break;
           default:
             console.log(
@@ -251,8 +345,8 @@ export function createCheckAndRespondTasksHandler(
               action: "NOTIFY_USER",
               task_type: task.task_type,
               initiator: task.initiator,
-              message: task.message,
-              instruction: `未知任务类型 ${task.task_type}，请将消息通知用户。`,
+              display_to_user: task.message,
+              instruction: `请将 display_to_user 的内容通知用户。`,
             });
             break;
         }
