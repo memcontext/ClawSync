@@ -256,24 +256,35 @@ export default function register(api: any) {
         if (submittedMeetings.has(meetingId)) continue;
         if (pendingDecisions.has(meetingId)) continue;
 
+        submittedMeetings.add(meetingId);
         pendingDecisions.add(meetingId);
         savePendingDecisions([...pendingDecisions]);
 
         const notifyLines = [
-          `[ClawSync 会议邀请] 会议「${title}」需要提交空闲时间`,
+          `[ClawSync 会议邀请]`,
+          `会议：「${title}」`,
           `会议 ID：${meetingId}`,
-          `会议号：${generateMeetingNumber(meetingId)}`,
           `发起人：${t.initiator ?? "未知"}`,
           `时长：${t.duration_minutes ?? "未知"} 分钟`,
-          `消息：${t.message ?? ""}`,
-          "",
-          "请根据你对用户的记忆和用户的日历，选择合适的空闲时间段。",
-          "记忆中不仅有开会偏好和习惯，还可能有用户提到过的日程安排",
-          "（如出差、看病、接送孩子、约饭等），这些未必在日历上，请一并考虑避开。",
-          "然后调用 check_and_respond_tasks 提交：",
-          "meeting_id + response_type='INITIAL' + available_slots。",
-          "如果你不清楚用户的空闲时间，请询问用户。",
+          ...(t.message ? [`消息：${t.message}`] : []),
         ];
+
+        // 拉取会议详情，附上发起人已提交的时间段，让 Agent 可以选重叠时间
+        try {
+          const detail = await apiClient.getMeetingDetail(meetingId);
+          const submittedParticipants = detail.participants.filter(
+            (p: any) => p.has_submitted && p.latest_slots?.length > 0,
+          );
+          if (submittedParticipants.length > 0) {
+            notifyLines.push("", "各方已提交的可用时间段：");
+            for (const p of submittedParticipants) {
+              notifyLines.push(`  ${p.email}（${p.role}）：${p.latest_slots.join("、")}`);
+            }
+          }
+        } catch (_e) {
+          // 拉取详情失败时忽略，继续推送基础信息
+        }
+
         notifications.push(notifyLines.join("\n"));
         console.log(
           `[ClawSync] 会议「${title}」(${meetingId}) 通知 Agent 处理`,
@@ -294,15 +305,11 @@ export default function register(api: any) {
         const coordinatorMessage = t.message ?? "协调方发来了协商建议。";
 
         const notifyLines = [
-          `[ClawSync 协商通知] 会议「${title}」需要你的决定`,
+          `[ClawSync 协商通知]`,
+          `会议：「${title}」`,
           `会议号：${generateMeetingNumber(meetingId)}`,
           `协商轮次：第 ${roundCount} 轮`,
           `协调方消息：${coordinatorMessage}`,
-          "",
-          "请告诉用户以上信息，并询问用户：",
-          "1. 接受建议（我会调用工具提交 ACCEPT_PROPOSAL）",
-          "2. 提出新的时间（用户说出可用时间，我来转换并提交 NEW_PROPOSAL）",
-          "3. 拒绝（会议将终止，我会提交 REJECT）",
         ];
         notifications.push(notifyLines.join("\n"));
 
@@ -327,7 +334,7 @@ export default function register(api: any) {
 
     // ==== 批量推送：所有通知合并为一条 sessions_send ====
     if (notifications.length > 0) {
-      const batchMessage = `[ClawSync 会议通知] 请将以下会议信息逐条通知用户：\n\n${notifications.join("\n\n---\n\n")}`;
+      const batchMessage = `[ClawSync 会议通知]\n\n${notifications.join("\n\n---\n\n")}`;
       const pushed = await pushMessageToSession(batchMessage);
       if (!pushed) {
         // fallback: 放入 pendingNotifications，等用户下次交互时展示
