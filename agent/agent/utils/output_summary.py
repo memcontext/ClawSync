@@ -61,19 +61,23 @@ class CoordinatorResult(BaseModel):
 
 # ─── 会议结构变更检测 ─────────────────────────────────────────────────────────
 
-def _detect_structural_changes(participants_info: list[dict]) -> str | None:
+def _detect_preference_issues(participants_info: list[dict]) -> dict | None:
     """
-    用 LLM 检测 preference_note 中是否包含会议结构调整建议。
-    如修改时长、拆分会议、增减参会人等。只关注非拒绝用户的 preference_note。
-    返回变更描述（str）或 None。
+    用 LLM 统一检测 preference_note 中的问题，包括：
+      1. 拒绝参会（明确表示不参加、拒绝）
+      2. 会议结构变更（修改时长、拆分会议、增减人员、改变形式等）
+
+    返回 {"type": "rejected"|"structural_change", "detail": "..."} 或 None。
     """
     notes = []
     for p in participants_info:
         note = (p.get("preference_note") or "").strip()
-        if not note or note.startswith("[已拒绝]"):
+        if not note:
             continue
         email = p.get("email", "unknown")
-        notes.append(f"{email}: {note}")
+        slots = p.get("latest_slots") or []
+        slots_info = f"（已提交时间: {', '.join(str(s) for s in slots[:3])}）" if slots else "（未提交时间）"
+        notes.append(f"{email}{slots_info}: {note}")
 
     if not notes:
         return None
@@ -87,15 +91,19 @@ def _detect_structural_changes(participants_info: list[dict]) -> str | None:
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", (
-            "你是一个会议协调助手。判断以下参与者备注中是否有人提出了会议结构调整建议。\n"
-            "会议结构调整包括但不限于：\n"
-            "  - 修改会议时长（如「建议改成30分钟」「时间太长了」）\n"
-            "  - 拆分为多次会议（如「建议分两次开」）\n"
-            "  - 增减参会人员（如「建议也叫上某某」「我可以不参加」）\n"
-            "  - 改变会议形式（如「建议改成线上」「改成邮件沟通」）\n\n"
-            "纯时间偏好（如「我更喜欢下午」「周五不方便」）不算结构调整。\n\n"
-            "如果检测到结构调整建议，输出一行简短描述（如「bob@x.com 建议将时长改为30分钟」）。\n"
-            "如果没有，只输出：无"
+            "你是一个会议协调助手。分析以下参与者备注，判断是否存在以下两类问题：\n\n"
+            "1. **拒绝参会**：参与者明确表示不参加、拒绝会议、无法出席。\n"
+            "   标记为 [已拒绝] 的备注一定是拒绝。\n"
+            "   例如：「我不参加了」「这个会我就不去了」「[已拒绝] 时间不合适」\n\n"
+            "2. **会议结构变更**：参与者建议修改会议本身的设置，而非单纯的时间偏好。\n"
+            "   包括但不限于：修改时长、拆分会议、增减人员、改变形式（线上/线下/邮件代替）。\n"
+            "   例如：「建议改成30分钟」「建议分两次开」「建议也叫上某某」「改成邮件沟通吧」\n\n"
+            "纯时间偏好（如「我更喜欢下午」「周五不方便」「尽量安排在上午」）不属于以上任何一类。\n\n"
+            "请输出一行：\n"
+            "- 如果检测到拒绝：rejected: 简短描述（如 bob@x.com 拒绝参会，原因：时间不合适）\n"
+            "- 如果检测到结构变更：structural_change: 简短描述（如 bob@x.com 建议将时长改为30分钟）\n"
+            "- 如果两者都有，优先输出 rejected\n"
+            "- 如果都没有：无"
         )),
         ("human", "参与者备注：\n{notes}"),
     ])
@@ -105,9 +113,15 @@ def _detect_structural_changes(participants_info: list[dict]) -> str | None:
         answer = result.content.strip()
         if answer == "无" or not answer:
             return None
-        return answer
+        if answer.startswith("rejected:"):
+            return {"type": "rejected", "detail": answer[len("rejected:"):].strip()}
+        if answer.startswith("structural_change:"):
+            return {"type": "structural_change", "detail": answer[len("structural_change:"):].strip()}
+        # 兜底：无法解析的格式视为无问题
+        logger.warning("preference_note 检测返回未知格式: %s", answer)
+        return None
     except Exception as e:
-        logger.warning("结构变更检测 LLM 调用失败，跳过: %s", e)
+        logger.warning("preference_note LLM 检测失败，跳过: %s", e)
         return None
 
 
@@ -439,41 +453,26 @@ def summarize_meeting(
             "counter_proposals": [],
         }
 
-    # ── FAILED：有参与者拒绝 ──────────────────────────────────────────────────
+    # ── FAILED：LLM 统一检测 preference_note（拒绝 / 结构变更） ─────────────
     if participants_info:
-        rejected = [
-            p for p in participants_info
-            if (p.get("preference_note") or "").startswith("[已拒绝]")
-        ]
-        if rejected:
-            emails = [p.get("email", "unknown") for p in rejected]
-            reasons = [
-                (p.get("preference_note") or "").replace("[已拒绝] ", "")
-                for p in rejected
-            ]
-            detail = "、".join(
-                f"{e}（{r}）" if r else e
-                for e, r in zip(emails, reasons)
-            )
-            logger.info("有参与者拒绝，直接 FAILED: %s", detail)
-            return {
-                "decision_status": "FAILED",
-                "final_time": None,
-                "agent_reasoning": f"参与者 {detail} 拒绝了会议邀请，无法继续协商。",
-                "counter_proposals": [],
-            }
-
-    # ── FAILED：参与者提出更改会议结构（时长、拆分、人员等） ─────────────────
-    if participants_info:
-        structural_changes = _detect_structural_changes(participants_info)
-        if structural_changes:
-            logger.info("检测到会议结构变更请求，直接 FAILED: %s", structural_changes)
-            return {
-                "decision_status": "FAILED",
-                "final_time": None,
-                "agent_reasoning": f"有参与者提出了会议结构调整建议，当前会议设置需要发起人重新确认：{structural_changes}",
-                "counter_proposals": [],
-            }
+        issue = _detect_preference_issues(participants_info)
+        if issue:
+            if issue["type"] == "rejected":
+                logger.info("LLM 检测到参与者拒绝，直接 FAILED: %s", issue["detail"])
+                return {
+                    "decision_status": "FAILED",
+                    "final_time": None,
+                    "agent_reasoning": f"参与者拒绝了会议邀请：{issue['detail']}",
+                    "counter_proposals": [],
+                }
+            elif issue["type"] == "structural_change":
+                logger.info("LLM 检测到会议结构变更请求，直接 FAILED: %s", issue["detail"])
+                return {
+                    "decision_status": "FAILED",
+                    "final_time": None,
+                    "agent_reasoning": f"有参与者提出了会议结构调整建议，当前会议设置需要发起人重新确认：{issue['detail']}",
+                    "counter_proposals": [],
+                }
 
     path = _score_file(meeting_id)
     if not path.exists():
