@@ -40,7 +40,7 @@ export const checkAndRespondTasksSchema = {
     "  INITIAL          — 首次提交空闲时间（需要 available_slots）",
     "  NEW_PROPOSAL     — 协商中重新提交时间（需要 available_slots）",
     "  ACCEPT_PROPOSAL  — 接受协调方的妥协建议（不需要 available_slots）",
-    "  REJECT           — 拒绝方案，会议终止（不需要 available_slots）",
+    "  REJECT           — 拒绝参加，记录拒绝但不立即终止会议（不需要 available_slots）",
     "",
     "工作流程：",
     "  1. 收到 INITIAL_SUBMIT 时，根据你对用户的记忆和日历选择空闲时间提交",
@@ -66,7 +66,7 @@ export const checkAndRespondTasksSchema = {
           "INITIAL - 首次提交空闲时间；",
           "NEW_PROPOSAL - 协商中重新提交时间；",
           "ACCEPT_PROPOSAL - 接受协调方建议；",
-          "REJECT - 拒绝方案，会议终止。",
+          "REJECT - 拒绝参加，记录拒绝但不立即终止会议。",
         ].join(" "),
       },
       available_slots: {
@@ -230,7 +230,7 @@ export function createCheckAndRespondTasksHandler(
           message: response_type === "ACCEPT_PROPOSAL"
             ? "已接受协调方建议。"
             : response_type === "REJECT"
-              ? "已拒绝方案，会议协商终止。"
+              ? "已记录拒绝。"
               : "响应已提交。",
           status: result.status,
           all_submitted: result.all_submitted,

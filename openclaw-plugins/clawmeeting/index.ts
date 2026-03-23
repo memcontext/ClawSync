@@ -185,35 +185,18 @@ export default function register(api: any) {
   // ============================================================
   // 8. 构建完整会议通知消息（含虚拟会议号）
   // ============================================================
-  function buildConfirmedNotification(t: any): string {
+  /** 构建纯通知消息（CONFIRMED/FAILED/OVER 等所有非行动类 task_type 统一处理） */
+  function buildNotification(t: any): string {
     const meetingId = t.meeting_id;
     const meetingNumber = generateMeetingNumber(meetingId);
     const serverMessage = t.message ?? "";
 
-    // 服务端 message 已包含完整信息（标题、时间、时长），直接附加
     const lines = [
-      `[ClawMeeting 会议确认]`,
+      `[ClawMeeting 会议通知]`,
       `会议号：${meetingNumber}`,
     ];
     if (serverMessage) {
       lines.push(serverMessage);
-    }
-    return lines.join("\n");
-  }
-
-  function buildFailedNotification(t: any): string {
-    const title = t.title ?? "未知会议";
-    const meetingId = t.meeting_id;
-    const meetingNumber = generateMeetingNumber(meetingId);
-    const serverMessage = t.message ?? "";
-
-    const lines = [
-      `[ClawMeeting 协商失败]`,
-      `会议名称：${title}`,
-      `会议号：${meetingNumber}`,
-    ];
-    if (serverMessage) {
-      lines.push(`原因：${serverMessage}`);
     }
     return lines.join("\n");
   }
@@ -232,24 +215,6 @@ export default function register(api: any) {
       const meetingId = t.meeting_id;
       const title = t.title ?? "未知会议";
       const taskType = t.task_type;
-
-      // ---- CONFIRMED：收集通知（去重）----
-      if (taskType === "MEETING_CONFIRMED") {
-        if (notifiedMeetings.has(meetingId)) continue;
-        notifiedMeetings.add(meetingId);
-        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 已确认`);
-        notifications.push(buildConfirmedNotification(t));
-        continue;
-      }
-
-      // ---- FAILED：收集通知（去重）----
-      if (taskType === "MEETING_FAILED") {
-        if (notifiedMeetings.has(meetingId)) continue;
-        notifiedMeetings.add(meetingId);
-        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 协商失败`);
-        notifications.push(buildFailedNotification(t));
-        continue;
-      }
 
       // ---- INITIAL_SUBMIT：通知 Agent，由 Agent 根据记忆和日历处理 ----
       if (taskType === "INITIAL_SUBMIT") {
@@ -319,12 +284,11 @@ export default function register(api: any) {
         continue;
       }
 
-      // ---- 未知类型：兜底通知（去重）----
-      if (!notifiedMeetings.has(meetingId)) {
-        notifiedMeetings.add(meetingId);
-        console.log(`[ClawMeeting] 未知任务类型「${title}」(${meetingId}) type=${taskType}`);
-        notifications.push(`📋 会议「${title}」有新消息：${t.message ?? taskType}`);
-      }
+      // ---- 其它类型（CONFIRMED/FAILED/OVER 等）：纯通知，展示 message 内容 ----
+      if (notifiedMeetings.has(meetingId)) continue;
+      notifiedMeetings.add(meetingId);
+      notifications.push(buildNotification(t));
+      console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 通知 type=${taskType}`);
     }
 
     // ==== 先持久化，再推送（确保不会因重启丢失去重状态）====
@@ -581,9 +545,9 @@ export default function register(api: any) {
             "  你需要将建议内容告知用户，并询问用户选择：",
             "  1. 接受建议 → 调用 check_and_respond_tasks，response_type='ACCEPT_PROPOSAL'",
             "  2. 提出新时间 → 让用户说出可用时间，你解析后调用 response_type='NEW_PROPOSAL' + available_slots",
-            "  3. 拒绝 → 调用 response_type='REJECT'（会议将终止）",
-            "- 收到 [ClawMeeting 会议确认] 或 [ClawMeeting 协商失败] 消息时，",
-            "  请用自然语言将会议信息完整地告知用户。",
+            "  3. 拒绝 → 调用 response_type='REJECT'（记录拒绝，不会立即终止会议）",
+            "- 收到 [ClawMeeting 会议通知] 消息时（会议确认、失败、取消、结束等），",
+            "  请用自然语言将通知内容完整地告知用户。",
           ].join("\n")
         : [
             "[ClawMeeting 会议助手 - 需要初始化]",
