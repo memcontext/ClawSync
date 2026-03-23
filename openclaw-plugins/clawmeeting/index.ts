@@ -369,7 +369,8 @@ export default function register(api: any) {
         if (tt === "COUNTER_PROPOSAL") {
           return !pendingDecisions.has(t.meeting_id);
         }
-        return true;
+        // 其它未知类型：用 notifiedMeetings 去重，防止重复推送
+        return !notifiedMeetings.has(t.meeting_id);
       });
       if (newTasks.length > 0) {
         console.log(`[ClawMeeting] 轮询发现 ${newTasks.length} 个新待办任务`);
