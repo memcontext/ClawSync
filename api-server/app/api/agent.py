@@ -134,29 +134,19 @@ async def submit_coordination_result(
             meeting.updated_at = datetime.utcnow()
             state_logger.info(f"CONFIRMED | {meeting_id} | {meeting.title} | final_time={result.final_time}")
 
-            # 分角色通知：发起人收到 CONFIRMED，被邀请人收到 OVER
+            # CONFIRMED：全体参会人统一收到确认通知
             logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             for log in logs:
                 log.action_required = True
-                if log.user_id == meeting.initiator_id:
-                    # 发起人：CONFIRMED 通知
-                    log.counter_proposal_message = (
-                        f"✅ 会议已确认！\n"
-                        f"会议：{meeting.title}\n"
-                        f"时间：{result.final_time}\n"
-                        f"时长：{meeting.duration_minutes} 分钟"
-                    )
-                else:
-                    # 被邀请人：OVER 通知（含最终时间，供确认）
-                    log.counter_proposal_message = (
-                        f"📋 会议已确定\n"
-                        f"会议：{meeting.title}\n"
-                        f"时间：{result.final_time}\n"
-                        f"时长：{meeting.duration_minutes} 分钟\n"
-                        f"请确认是否可以参加。"
-                    )
+                log.counter_proposal_message = (
+                    f"✅ 会议已确认！\n"
+                    f"会议：{meeting.title}\n"
+                    f"时间：{result.final_time}\n"
+                    f"时长：{meeting.duration_minutes} 分钟\n"
+                    f"请确认参加。"
+                )
                 log.updated_at = datetime.utcnow()
 
         elif result.decision_status == DecisionStatus.NEGOTIATING:
@@ -241,23 +231,8 @@ async def submit_coordination_result(
                 meeting.updated_at = datetime.utcnow()
                 state_logger.info(f"FAILED(MAX_ROUNDS) | {meeting_id} | {meeting.title} | round={meeting.round_count}")
 
-                for log in logs:
-                    log.action_required = True
-                    if log.user_id == meeting.initiator_id:
-                        log.counter_proposal_message = (
-                            f"❌ 协商失败\n"
-                            f"会议：{meeting.title}\n"
-                            f"原因：已达最大协商轮数限制\n"
-                            f"如需重新发起，请创建新的会议。"
-                        )
-                    else:
-                        log.counter_proposal_message = (
-                            f"📋 会议已结束\n"
-                            f"会议：{meeting.title}\n"
-                            f"结果：协商未能达成，会议已取消"
-                        )
-                    log.suggested_slots = None
-                    log.updated_at = datetime.utcnow()
+                # FAILED：仅通知发起人，附带参与者详情
+                _notify_failed_initiator_only(meeting, logs, "已达最大协商轮数限制", db)
 
         elif result.decision_status == DecisionStatus.FAILED:
             # ====== 场景 C: 彻底失败 → FAILED ======
@@ -320,26 +295,11 @@ async def submit_coordination_result(
             meeting.coordinator_reasoning = result.agent_reasoning
             meeting.updated_at = datetime.utcnow()
 
-            # 分角色通知：发起人收到 FAILED，被邀请人收到 OVER
+            # FAILED：仅通知发起人，附带参与者详情
             logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
-            for log in logs:
-                log.action_required = True
-                if log.user_id == meeting.initiator_id:
-                    log.counter_proposal_message = (
-                        f"❌ 协商失败\n"
-                        f"会议：{meeting.title}\n"
-                        f"原因：{result.agent_reasoning}\n"
-                        f"如需重新发起，请创建新的会议。"
-                    )
-                else:
-                    log.counter_proposal_message = (
-                        f"📋 会议已结束\n"
-                        f"会议：{meeting.title}\n"
-                        f"结果：协商未能达成，会议已取消"
-                    )
-                log.updated_at = datetime.utcnow()
+            _notify_failed_initiator_only(meeting, logs, result.agent_reasoning, db)
 
         db.commit()
 
@@ -360,6 +320,46 @@ async def submit_coordination_result(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _notify_failed_initiator_only(meeting, logs, reason, db):
+    """
+    FAILED 时仅通知发起人，附带所有参与者的详细时间信息和拒绝原因。
+    被邀请人暂不通知（等发起人决策：取消→OVER 或 重新发起→COLLECTING）。
+    """
+    # 构建参与者详情
+    participants_info = []
+    for log in logs:
+        user = db.query(User).filter(User.id == log.user_id).first()
+        email = user.email if user else "unknown"
+        if log.preference_note and log.preference_note.startswith("[已拒绝]"):
+            status = f"❌ 已拒绝（{log.preference_note.replace('[已拒绝] ', '')}）"
+        elif not log.latest_slots:
+            status = "未提交"
+        else:
+            slots_preview = ", ".join(log.latest_slots[:3])
+            status = f"可用: {slots_preview}"
+        participants_info.append(f"  {email}: {status}")
+    detail = "\n".join(participants_info)
+
+    for log in logs:
+        if log.user_id == meeting.initiator_id:
+            log.action_required = True
+            log.counter_proposal_message = (
+                f"❌ 协商失败\n"
+                f"会议：{meeting.title}\n"
+                f"原因：{reason}\n"
+                f"参与者情况：\n{detail}\n\n"
+                f"您可以选择：\n"
+                f"  · 取消会议（拒绝）\n"
+                f"  · 调整时间后重新发起"
+            )
+        else:
+            # 被邀请人暂不通知，等发起人决策
+            log.action_required = False
+            log.counter_proposal_message = None
+        log.suggested_slots = None
+        log.updated_at = datetime.utcnow()
 
 
 def _format_slots_for_agent(slots: list) -> list:

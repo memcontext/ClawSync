@@ -33,13 +33,17 @@ async def get_pending_tasks(
             initiator = db.query(User).filter(User.id == meeting.initiator_id).first()
 
             # 根据会议状态 + 用户角色确定任务类型和消息
-            if meeting.status in ("CONFIRMED", "FAILED") and log.counter_proposal_message:
-                if log.user_id == meeting.initiator_id:
-                    # 发起人：CONFIRMED → MEETING_CONFIRMED，FAILED → MEETING_FAILED
-                    task_type = "MEETING_CONFIRMED" if meeting.status == "CONFIRMED" else "MEETING_FAILED"
-                else:
-                    # 被邀请人：统一收到 MEETING_OVER（无论成功或失败）
-                    task_type = "MEETING_OVER"
+            if meeting.status == "CONFIRMED" and log.counter_proposal_message:
+                # CONFIRMED：全体收到确认通知
+                task_type = "MEETING_CONFIRMED"
+                message = log.counter_proposal_message
+            elif meeting.status == "FAILED" and log.counter_proposal_message:
+                # FAILED：仅发起人收到（被邀请人 action_required=False，不会进入这里）
+                task_type = "MEETING_FAILED"
+                message = log.counter_proposal_message
+            elif meeting.status == "OVER" and log.counter_proposal_message:
+                # OVER：被邀请人收到取消通知
+                task_type = "MEETING_OVER"
                 message = log.counter_proposal_message
             elif log.counter_proposal_message:
                 # COLLECTING 或 NEGOTIATING 状态下，有 Agent 的妥协建议（多轮协商）

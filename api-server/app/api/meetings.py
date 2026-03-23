@@ -230,11 +230,18 @@ async def submit_availability(
 
         current_state = MeetingState(meeting.status)
 
-        # 只有 COLLECTING 或 NEGOTIATING 状态才允许提交
-        if current_state not in (MeetingState.COLLECTING, MeetingState.NEGOTIATING):
+        # COLLECTING/NEGOTIATING 允许提交时间，FAILED 允许发起人取消(REJECT)或重新发起
+        allowed_states = (MeetingState.COLLECTING, MeetingState.NEGOTIATING, MeetingState.FAILED)
+        if current_state not in allowed_states:
             raise HTTPException(
                 status_code=400,
                 detail=f"当前会议状态为 {meeting.status}，不允许提交"
+            )
+        # FAILED 状态下只有发起人可以操作
+        if current_state == MeetingState.FAILED and current_user.id != meeting.initiator_id:
+            raise HTTPException(
+                status_code=403,
+                detail="会议协商已失败，只有发起人可以取消或重新发起"
             )
 
         negotiation_log = db.query(NegotiationLog).filter(
@@ -248,59 +255,77 @@ async def submit_availability(
         # ---- 根据 response_type 分支处理 ----
 
         if submit_data.response_type == ResponseType.REJECT:
-            # ====== REJECT：不直接 FAILED，而是通知发起人并交给 Agent 重新协商 ======
-            is_collecting = current_state == MeetingState.COLLECTING
-            reject_reason = (
-                f"用户 {current_user.email} 拒绝了会议邀请"
-                if is_collecting
-                else f"用户 {current_user.email} 拒绝了协商方案"
-            )
+            # ====== REJECT：记录拒绝但不中断收集，等全员完成后统一进入 ANALYZING ======
+            # FAILED 状态下发起人 REJECT = 取消会议 → OVER
+            if current_state == MeetingState.FAILED and current_user.id == meeting.initiator_id:
+                # 发起人在 FAILED 阶段取消会议 → OVER
+                new_state = state_machine.transition(
+                    current=MeetingState.FAILED,
+                    target=MeetingState.OVER,
+                    context={"meeting_id": meeting_id}
+                )
+                meeting.status = new_state.value
+                meeting.updated_at = datetime.utcnow()
+                state_logger.info(f"FAILED→OVER | {meeting_id} | {meeting.title} | 发起人取消会议")
 
-            # 标记拒绝者已完成（不再需要操作），记录拒绝原因
+                # 通知所有被邀请人会议已取消
+                all_logs = db.query(NegotiationLog).filter(
+                    NegotiationLog.meeting_id == meeting_id
+                ).all()
+                for log in all_logs:
+                    if log.user_id != current_user.id:
+                        log.action_required = True
+                        log.counter_proposal_message = (
+                            f"📋 会议已取消\n"
+                            f"会议：{meeting.title}\n"
+                            f"发起人已取消此会议。"
+                        )
+                        log.updated_at = datetime.utcnow()
+
+                db.commit()
+                return APIResponse(
+                    code=200,
+                    message="会议已取消，已通知所有参与者",
+                    data={
+                        "id": meeting_id, "meeting_id": meeting_id,
+                        "response_type": "REJECT", "status": meeting.status,
+                    }
+                )
+
+            # COLLECTING/NEGOTIATING 阶段：记录拒绝，不中断收集
+            reject_reason = submit_data.preference_note or "未说明拒绝原因"
+
+            # 标记拒绝者已完成，记录拒绝原因和空 slots
             negotiation_log.action_required = False
-            negotiation_log.preference_note = submit_data.preference_note or reject_reason
-            negotiation_log.latest_slots = []  # 清空时间槽，表示此人无法参加
+            negotiation_log.latest_slots = []  # 空 slots = 无法参加
+            negotiation_log.preference_note = f"[已拒绝] {reject_reason}"
             negotiation_log.counter_proposal_message = None
             negotiation_log.updated_at = datetime.utcnow()
+            db.commit()
 
-            # 不直接 FAILED，转为 ANALYZING 让 Agent 重新分析
-            # Agent 会看到这个用户的 latest_slots 为空 + preference_note 包含拒绝原因
-            # Agent 可以决定：排除此人继续协商、或判断无法继续 → 返回 FAILED
-            _transition_to_analyzing(meeting, current_state, db)
             state_logger.info(
-                f"REJECTED→ANALYZING | {meeting_id} | {meeting.title} | "
-                f"by={current_user.email} | reason={reject_reason} | 交给 Agent 重新分析"
+                f"REJECT_RECORDED | {meeting_id} | {meeting.title} | "
+                f"by={current_user.email} | reason={reject_reason} | 继续收集其他人"
             )
 
-            # 通知发起人有人拒绝了（发起人收到 COUNTER_PROPOSAL 类型通知）
-            initiator_log = db.query(NegotiationLog).filter(
-                NegotiationLog.meeting_id == meeting_id,
-                NegotiationLog.user_id == meeting.initiator_id
-            ).first()
-            if initiator_log:
-                initiator_log.action_required = True
-                initiator_log.counter_proposal_message = (
-                    f"⚠️ {current_user.email} 拒绝了会议\n"
-                    f"会议：{meeting.title}\n"
-                    f"原因：{submit_data.preference_note or '未说明'}\n"
-                    f"系统正在重新分析可行方案..."
-                )
-                initiator_log.updated_at = datetime.utcnow()
+            # 检查是否全员已完成（和 INITIAL 提交一样的逻辑）
+            all_logs = db.query(NegotiationLog).filter(
+                NegotiationLog.meeting_id == meeting_id
+            ).all()
+            all_submitted = all(not p.action_required for p in all_logs)
 
-            db.commit()
+            if all_submitted:
+                # 全员完成 → ANALYZING，Agent 会看到此人 slots 为空 + [已拒绝] 标记
+                _transition_to_analyzing(meeting, current_state, db)
 
             return APIResponse(
                 code=200,
-                message="已记录拒绝，系统正在重新分析可行方案",
+                message="已记录拒绝" + ("，全员已完成，等待协调分析" if all_submitted else "，等待其他参与者提交"),
                 data={
-                    "id": meeting_id,
-                    "meeting_id": meeting_id,
+                    "id": meeting_id, "meeting_id": meeting_id,
                     "response_type": submit_data.response_type.value,
                     "status": meeting.status,
-                    "all_submitted": False,
-                    "coordinator_result": None,
-                    "created_at": negotiation_log.created_at.isoformat() if negotiation_log.created_at else None,
-                    "updated_at": negotiation_log.updated_at.isoformat() if negotiation_log.updated_at else None
+                    "all_submitted": all_submitted,
                 }
             )
 

@@ -25,7 +25,7 @@ class StateMachine:
             MeetingState.ANALYZING: [MeetingState.CONFIRMED, MeetingState.NEGOTIATING, MeetingState.FAILED],
             MeetingState.NEGOTIATING: [MeetingState.COLLECTING, MeetingState.ANALYZING, MeetingState.FAILED],
             MeetingState.CONFIRMED: [MeetingState.OVER],
-            MeetingState.FAILED: [MeetingState.OVER],
+            MeetingState.FAILED: [MeetingState.OVER, MeetingState.COLLECTING],  # 发起人可取消(OVER)或重新发起(COLLECTING)
             MeetingState.OVER: []
         }
 
