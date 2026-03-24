@@ -188,12 +188,36 @@ export default function register(api: any) {
   function buildNotification(t: any): string {
     const meetingId = t.meeting_id;
     const meetingNumber = generateMeetingNumber(meetingId);
+    const title = t.title ?? "未知会议";
+    const taskType = t.task_type ?? "";
     const serverMessage = t.message ?? "";
+
+    // 状态映射为人类可读文本
+    const statusMap: Record<string, string> = {
+      MEETING_CONFIRMED: "✅ Meeting Confirmed",
+      MEETING_OVER: "📋 Meeting Over",
+      MEETING_FAILED: "❌ Meeting Failed",
+    };
+    const statusText = statusMap[taskType] ?? taskType;
 
     const lines = [
       `[ClawMeeting Notification]`,
+      `${statusText}`,
+      `Meeting: "${title}"`,
       `Meeting #: ${meetingNumber}`,
     ];
+
+    // 确认的会议：尝试获取最终时间
+    if (taskType === "MEETING_CONFIRMED") {
+      // 异步拉详情不现实（这是同步函数），用 t 上可能有的字段
+      if (t.final_time) {
+        lines.push(`Time: ${t.final_time}`);
+      }
+      if (t.duration_minutes) {
+        lines.push(`Duration: ${t.duration_minutes} minutes`);
+      }
+    }
+
     if (serverMessage) {
       lines.push(serverMessage);
     }
@@ -311,6 +335,18 @@ export default function register(api: any) {
       // ---- 其它类型（CONFIRMED/OVER 等）：纯通知，展示 message 内容 ----
       if (notifiedMeetings.has(meetingId)) continue;
       notifiedMeetings.add(meetingId);
+
+      // CONFIRMED：拉详情补充最终时间和参与者信息
+      if (taskType === "MEETING_CONFIRMED") {
+        try {
+          const detail = await apiClient.getMeetingDetail(meetingId);
+          t.final_time = detail.final_time ?? null;
+          t.duration_minutes = t.duration_minutes ?? (detail as any).duration_minutes ?? null;
+        } catch (_e) {
+          // 拉详情失败不影响通知，继续用已有信息
+        }
+      }
+
       notifications.push(buildNotification(t));
       console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 通知 type=${taskType}`);
     }
