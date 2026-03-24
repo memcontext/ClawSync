@@ -207,7 +207,7 @@ def _build_chain():
         base_url=DOUBAO_BASE_URL,
         temperature=LLM_TEMPERATURE,
     )
-    structured_llm = llm.with_structured_output(AvailabilityOutput)
+    structured_llm = llm.with_structured_output(AvailabilityOutput, method="function_calling")
 
     slots_text = "\n".join(f"  {s}" for s in TIME_SLOTS)
 
