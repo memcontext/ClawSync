@@ -193,15 +193,15 @@ export default function register(api: any) {
   // ============================================================
   // 8. 构建完整会议通知消息（含虚拟会议号）
   // ============================================================
-  /** 构建纯通知消息（CONFIRMED/FAILED/OVER 等所有非行动类 task_type 统一处理） */
+  /** Build notification message for non-action task types (CONFIRMED/OVER/etc.) */
   function buildNotification(t: any): string {
     const meetingId = t.meeting_id;
     const meetingNumber = generateMeetingNumber(meetingId);
     const serverMessage = t.message ?? "";
 
     const lines = [
-      `[ClawMeeting 会议通知]`,
-      `会议号：${meetingNumber}`,
+      `[ClawMeeting Notification]`,
+      `Meeting #: ${meetingNumber}`,
     ];
     if (serverMessage) {
       lines.push(serverMessage);
@@ -234,28 +234,28 @@ export default function register(api: any) {
         savePendingDecisions([...pendingDecisions]);
 
         const notifyLines = [
-          `[ClawMeeting 会议邀请]`,
-          `会议：「${title}」`,
-          `会议 ID：${meetingId}`,
-          `会议号：${generateMeetingNumber(meetingId)}`,
-          `发起人：${t.initiator ?? "未知"}`,
-          `时长：${t.duration_minutes ?? "未知"} 分钟`,
+          `[ClawMeeting Meeting Invitation]`,
+          `Meeting: "${title}"`,
+          `Meeting ID: ${meetingId}`,
+          `Meeting #: ${generateMeetingNumber(meetingId)}`,
+          `Organizer: ${t.initiator ?? "unknown"}`,
+          `Duration: ${t.duration_minutes ?? "unknown"} minutes`,
         ];
 
-        // 拉取会议详情，附上发起人已提交的时间段，让 Agent 可以选重叠时间
+        // Fetch meeting detail to include initiator's submitted time slots
         try {
           const detail = await apiClient.getMeetingDetail(meetingId);
           const submittedParticipants = detail.participants.filter(
             (p: any) => p.has_submitted && p.latest_slots?.length > 0,
           );
           if (submittedParticipants.length > 0) {
-            notifyLines.push("", "各方已提交的可用时间段：");
+            notifyLines.push("", "Submitted available slots:");
             for (const p of submittedParticipants) {
-              notifyLines.push(`  ${p.email}（${p.role}）：${p.latest_slots.join("、")}`);
+              notifyLines.push(`  ${p.email} (${p.role}): ${p.latest_slots.join(", ")}`);
             }
           }
         } catch (_e) {
-          // 拉取详情失败时忽略，继续推送基础信息
+          // Ignore detail fetch failures, continue with basic info
         }
 
         notifications.push(notifyLines.join("\n"));
@@ -278,11 +278,11 @@ export default function register(api: any) {
         const coordinatorMessage = t.message ?? "协调方发来了协商建议。";
 
         const notifyLines = [
-          `[ClawMeeting 协商通知]`,
-          `会议：「${title}」`,
-          `会议号：${generateMeetingNumber(meetingId)}`,
-          `协商轮次：第 ${roundCount} 轮`,
-          `协调方消息：${coordinatorMessage}`,
+          `[ClawMeeting Negotiation Update]`,
+          `Meeting: "${title}"`,
+          `Meeting #: ${generateMeetingNumber(meetingId)}`,
+          `Negotiation round: ${roundCount}`,
+          `Coordinator message: ${coordinatorMessage}`,
         ];
         notifications.push(notifyLines.join("\n"));
 
@@ -300,15 +300,15 @@ export default function register(api: any) {
         savePendingDecisions([...pendingDecisions]);
 
         const notifyLines = [
-          `[ClawMeeting 协商失败]`,
-          `会议：「${title}」`,
-          `会议 ID：${meetingId}`,
-          `会议号：${generateMeetingNumber(meetingId)}`,
-          `${t.message ?? "会议协商失败。"}`,
+          `[ClawMeeting Negotiation Failed]`,
+          `Meeting: "${title}"`,
+          `Meeting ID: ${meetingId}`,
+          `Meeting #: ${generateMeetingNumber(meetingId)}`,
+          `${t.message ?? "Meeting negotiation failed."}`,
           "",
-          "请告知用户以上信息，并询问用户：",
-          "1. 取消会议（调用 check_and_respond_tasks，response_type='REJECT'）",
-          "2. 调整时间后重新发起（用户说出新的可用时间，调用 check_and_respond_tasks，response_type='NEW_PROPOSAL' + available_slots）",
+          "Inform the user of the above details and ask them to choose:",
+          "1. Cancel the meeting (call check_and_respond_tasks with response_type='REJECT')",
+          "2. Retry with adjusted times (user provides new times, call check_and_respond_tasks with response_type='NEW_PROPOSAL' + available_slots)",
         ];
         notifications.push(notifyLines.join("\n"));
         console.log(
@@ -331,7 +331,7 @@ export default function register(api: any) {
 
     // ==== 批量推送：所有通知合并为一条 sessions_send ====
     if (notifications.length > 0) {
-      const batchMessage = `[ClawMeeting 会议通知]\n\n${notifications.join("\n\n---\n\n")}`;
+      const batchMessage = `[ClawMeeting Notifications]\n\n${notifications.join("\n\n---\n\n")}`;
       const pushed = await pushMessageToSession(batchMessage);
       if (!pushed) {
         // fallback: 放入 pendingNotifications，等用户下次交互时展示
@@ -554,44 +554,44 @@ export default function register(api: any) {
 
       const systemPromptAddon = isBound
         ? [
-            "[ClawMeeting 会议助手已就绪]",
-            `当前绑定邮箱: ${savedCreds?.email ?? "未知"}，后台轮询运行中（自动处理会议邀请）。`,
+            "[ClawMeeting Assistant Ready]",
+            `Bound email: ${savedCreds?.email ?? "unknown"}. Background polling is active.`,
             "",
-            "用户可以直接说「帮我约某某开会」来发起会议协商，",
-            "或说「有没有新的会议邀请」来手动检查待办任务，",
-            "或说「查看我的会议」来查看所有参与的会议列表和详情。",
-            "会议在对话中用标题称呼（如「项目讨论会」），不需要让用户记 ID。",
+            "The user can schedule meetings by saying things like 'schedule a meeting with X',",
+            "check invitations with 'any new meeting invitations?',",
+            "or view meetings with 'show my meetings'.",
+            "Refer to meetings by title in conversation — the user does not need to know the meeting ID.",
             "",
-            "发起会议时的必填信息（用户用自然语言描述，你来解析）：",
-            "  - 会议标题",
-            "  - 会议时长（如「半小时」「一个小时」）",
-            "  - 受邀人邮箱",
-            "  - 发起人的可用时间段（如「明天下午2点到5点」）",
-            "如果用户的描述中缺少以上任何一项，请主动追问，不要自行假设。",
-            "你需要将自然语言中的时间描述转换为 'YYYY-MM-DD HH:MM-HH:MM' 格式。",
-            "同时，如果你的记忆中确实存在用户的开会偏好（如不喜欢早会、某天不开会等），",
-            "请填写 preference_note 参数帮助协调方安排时间。没有相关记忆就不要填，绝对不要编造。",
+            "Required info when initiating a meeting (user describes in natural language, you parse):",
+            "  - Meeting title",
+            "  - Duration (e.g. 'half an hour', '1 hour')",
+            "  - Invitee email(s)",
+            "  - Organizer's available time slots (e.g. 'tomorrow 2pm to 5pm')",
+            "If any of the above is missing, ask the user — do not assume.",
+            "Convert natural language time descriptions to 'YYYY-MM-DD HH:MM-HH:MM' format.",
+            "If your memory genuinely contains the user's meeting preferences (e.g. dislikes early meetings, no meetings on Fridays),",
+            "fill in the preference_note parameter. If you have no such memory, leave it empty — never fabricate.",
             "",
-            "后台行为说明：",
-            "- 收到 [ClawMeeting 会议邀请] 时，你需要根据对用户的记忆和日历选择空闲时间提交。",
-            "  记忆中不仅有偏好习惯，还可能有用户提到过的日程安排（出差、看病等），请一并避开。",
-            "  请尽可能自己处理：即使日历没有连接，只要记忆中有任何关于用户日程的线索，",
-            "  就结合发起人提供的时间段自行选择合适时间并提交，不要反复确认。",
-            "  只有在既没有连接日历、记忆中也完全没有未来行程信息时，才询问用户。",
-            "- 收到协商通知 [ClawMeeting 协商通知] 时，说明协调方的妥协建议来了，",
-            "  你需要将建议内容告知用户，并询问用户选择：",
-            "  1. 接受建议 → 调用 check_and_respond_tasks，response_type='ACCEPT_PROPOSAL'",
-            "  2. 提出新时间 → 让用户说出可用时间，你解析后调用 response_type='NEW_PROPOSAL' + available_slots",
-            "  3. 拒绝 → 调用 response_type='REJECT'（记录拒绝，不会立即终止会议）",
-            "- 收到 [ClawMeeting 协商失败] 时，将失败详情告知用户（发起人），并询问：",
-            "  1. 取消会议 → 调用 check_and_respond_tasks，response_type='REJECT'",
-            "  2. 调整时间重新发起 → 用户说出新时间，调用 response_type='NEW_PROPOSAL' + available_slots",
-            "- 收到 [ClawMeeting 会议通知] 消息时（会议确认、取消、结束等），",
-            "  请用自然语言将通知内容完整地告知用户。",
+            "Background behavior:",
+            "- On [ClawMeeting Meeting Invitation]: select available time slots based on the user's memory and calendar.",
+            "  Memory may contain not only preferences but also schedule info the user mentioned (business trips, appointments, etc.) — avoid those.",
+            "  Handle it yourself whenever possible: even without a connected calendar, if memory has any clues about the user's schedule,",
+            "  combine that with the organizer's proposed time slots and submit. Do not repeatedly ask for confirmation.",
+            "  Only ask the user when you have neither a connected calendar nor any schedule info in memory.",
+            "- On [ClawMeeting Negotiation Update]: the coordinator has sent a compromise proposal.",
+            "  Present the proposal to the user and ask them to choose:",
+            "  1. Accept → call check_and_respond_tasks with response_type='ACCEPT_PROPOSAL'",
+            "  2. Propose new times → user provides times, you parse and call response_type='NEW_PROPOSAL' + available_slots",
+            "  3. Reject → call response_type='REJECT' (records rejection, does not immediately terminate the meeting)",
+            "- On [ClawMeeting Negotiation Failed]: inform the user (organizer) of the failure details and ask:",
+            "  1. Cancel the meeting → call check_and_respond_tasks with response_type='REJECT'",
+            "  2. Retry with adjusted times → user provides new times, call response_type='NEW_PROPOSAL' + available_slots",
+            "- On [ClawMeeting Notification] (confirmation, cancellation, etc.):",
+            "  Relay the notification content to the user in natural language.",
           ].join("\n")
         : [
-            "[ClawMeeting 会议助手 - 需要初始化]",
-            "用户尚未绑定身份。请引导用户提供邮箱来完成绑定。",
+            "[ClawMeeting Assistant - Setup Required]",
+            "The user has not bound their identity yet. Guide them to provide their email to complete setup.",
           ].join("\n");
 
       const result: any = { appendSystemContext: systemPromptAddon };
@@ -599,7 +599,7 @@ export default function register(api: any) {
       // fallback 通知（主动推送失败时才有内容）
       if (pendingNotifications.length > 0) {
         result.prependContext = [
-          "[ClawMeeting 重要通知]",
+          "[ClawMeeting Important Notifications]",
           ...pendingNotifications,
         ].join("\n");
         pendingNotifications = [];

@@ -1,69 +1,68 @@
 // ============================================================
 // Tool 2: InitiateMeetingTool (initiate_meeting)
-// 对应 API 2: POST /api/meetings
+// API 2: POST /api/meetings
 //
-// 功能: 把用户输入的 "帮我约 B 和 C 开会" 转化为结构化请求
-// Agent 负责从用户自然语言中提取所有参数（标题、时长、受邀人、可用时间段），
-// 用户只需用自然语言描述，Agent 自行解析为结构化数据后调用此工具。
+// Converts natural language meeting requests into structured API calls.
+// The Agent parses title, duration, invitees, and time slots from user input.
 // ============================================================
 
 import type { ClawMeetingApiClient } from "../utils/api-client.js";
 import type { InitiateMeetingRequest } from "../types/index.js";
 
-/** Tool 的 JSON Schema 定义 */
+/** Tool JSON Schema definition */
 export const initiateMeetingSchema = {
   name: "initiate_meeting",
   description: [
-    "发起一场新的会议协商。",
-    "将用户的约会需求转化为结构化请求发送给服务端，",
-    "服务端会通知所有受邀人的 OpenClaw 插件来收集空闲时间。",
+    "Initiate a new meeting negotiation.",
+    "Converts the user's scheduling request into a structured API call.",
+    "The server will notify all invitees' OpenClaw plugins to collect their availability.",
     "",
-    "所有参数均为必填。用户会用自然语言描述需求，",
-    "例如: '帮我约 bob@x.com 和 charlie@x.com 明天下午2点到5点开一个半小时的架构讨论会'",
-    "你需要从中解析出 title、duration_minutes、invitees、available_slots 四个字段。",
+    "All parameters are required. The user describes their needs in natural language,",
+    "e.g.: 'Schedule a 30-min architecture review with bob@x.com and charlie@x.com tomorrow 2-5pm'",
+    "You need to parse title, duration_minutes, invitees, and available_slots from the description.",
     "",
-    "如果用户描述中缺少以下任何信息，请主动追问，不要自行假设：",
-    "  - 会议时长（duration_minutes）",
-    "  - 发起人的可用时间段（available_slots）",
+    "If any of the following are missing, ask the user — do not assume:",
+    "  - Meeting duration (duration_minutes)",
+    "  - Organizer's available time slots (available_slots)",
   ].join("\n"),
   parameters: {
     type: "object" as const,
     properties: {
       title: {
         type: "string" as const,
-        description: "会议标题，例如 '项目架构讨论会'",
+        description: "Meeting title, e.g. 'Architecture Review'",
       },
       duration_minutes: {
         type: "number" as const,
-        description: "会议时长（分钟），必填。从用户描述中解析，例如 '半小时' → 30，'一个小时' → 60",
+        description: "Meeting duration in minutes. Parse from user description, e.g. 'half an hour' → 30, 'one hour' → 60",
       },
       invitees: {
         type: "array" as const,
         items: { type: "string" as const },
         description:
-          "受邀人邮箱列表，例如 ['bob@example.com', 'charlie@example.com']",
+          "List of invitee email addresses, e.g. ['bob@example.com', 'charlie@example.com']",
       },
       available_slots: {
         type: "array" as const,
         items: { type: "string" as const },
         description: [
-          "发起人的可用时间段列表，必填。从用户的自然语言描述中解析。",
-          "格式: 'YYYY-MM-DD HH:MM-HH:MM'，例如 '2026-03-20 14:00-17:00'。",
-          "用户可能说 '明天下午2点到5点'，你需要转换为具体日期和时间。",
-          "可以有多个时间段。",
+          "Organizer's available time slots (required). Parse from the user's natural language description.",
+          "Format: 'YYYY-MM-DD HH:MM-HH:MM', e.g. '2026-03-20 14:00-17:00'.",
+          "The user might say 'tomorrow 2pm to 5pm' — convert to a concrete date and time.",
+          "Multiple time slots are allowed.",
         ].join(" "),
       },
       preference_note: {
         type: "string" as const,
         description:
-          "发起人的偏好说明（可选）。仅当你的记忆中确实存在用户的开会偏好时才填写，例如用户说过不喜欢早会、周五下午不开会等。没有相关记忆就不要填，绝对不要编造。也可包含用户本次额外说明的偏好。",
+          "Organizer's scheduling preferences (optional). Only fill this if your memory genuinely contains the user's meeting preferences, e.g. they mentioned disliking early meetings or no meetings on Fridays. If you have no such memory, leave it empty — never fabricate. May also include preferences the user explicitly states in this request.",
       },
     },
     required: ["title", "duration_minutes", "invitees", "available_slots"],
   },
 };
 
-/** Tool 的处理函数 */
+/** Tool handler function */
 export function createInitiateMeetingHandler(apiClient: ClawMeetingApiClient) {
   return async (params: {
     title: string;
@@ -80,32 +79,32 @@ export function createInitiateMeetingHandler(apiClient: ClawMeetingApiClient) {
       preference_note,
     } = params;
 
-    // 1. 检查 Token 是否已设置
+    // 1. Check Token
     if (!apiClient.getToken()) {
       return {
         success: false,
-        message: "尚未完成身份绑定，请先调用 bind_identity 工具绑定邮箱。",
+        message: "Identity not bound yet. Please call bind_identity first.",
       };
     }
 
-    // 2. 校验必填参数
+    // 2. Validate required params
     if (!available_slots || available_slots.length === 0) {
       return {
         success: false,
-        message: "缺少可用时间段（available_slots），请从用户描述中解析并提供。",
+        message: "Missing available_slots. Please parse from the user's description.",
       };
     }
     if (!duration_minutes || duration_minutes <= 0) {
       return {
         success: false,
-        message: "缺少会议时长（duration_minutes），请从用户描述中解析并提供。",
+        message: "Missing or invalid duration_minutes. Please parse from the user's description.",
       };
     }
 
-    // 3. preference_note 由 Agent 根据对用户的记忆自行填写
+    // 3. preference_note filled by Agent from user memory
     const finalNote = preference_note ?? undefined;
 
-    // 4. 构造请求
+    // 4. Build request
     const requestData: InitiateMeetingRequest = {
       title,
       duration_minutes,
@@ -116,49 +115,49 @@ export function createInitiateMeetingHandler(apiClient: ClawMeetingApiClient) {
       },
     };
 
-    // 5. 调用 API 2
+    // 5. Call API
     try {
       const result = await apiClient.initiateMeeting(requestData);
 
-      // 6. 校验响应字段
+      // 6. Validate response fields
       const errors: string[] = [];
       if (!result.id || typeof result.id !== "string") {
-        errors.push("响应缺少 id 字段或格式错误");
+        errors.push("Response missing 'id' field or invalid format");
       }
       if (!result.status) {
-        errors.push("响应缺少 status 字段");
+        errors.push("Response missing 'status' field");
       } else if (result.status !== "COLLECTING") {
-        errors.push(`状态异常: 期望 COLLECTING，实际 ${result.status}`);
+        errors.push(`Unexpected status: expected COLLECTING, got ${result.status}`);
       }
       if (!result.title || typeof result.title !== "string") {
-        errors.push("响应缺少 title 字段");
+        errors.push("Response missing 'title' field");
       }
       if (!result.duration_minutes || result.duration_minutes <= 0) {
-        errors.push("响应缺少 duration_minutes 或值无效");
+        errors.push("Response missing or invalid 'duration_minutes'");
       }
       if (!result.initiator_data) {
-        errors.push("响应缺少 initiator_data 字段");
+        errors.push("Response missing 'initiator_data' field");
       } else {
         if (!result.initiator_data.available_slots || !Array.isArray(result.initiator_data.available_slots) || result.initiator_data.available_slots.length === 0) {
-          errors.push("initiator_data.available_slots 为空或格式错误");
+          errors.push("initiator_data.available_slots is empty or invalid");
         }
       }
       if (!result.invitees || !Array.isArray(result.invitees) || result.invitees.length === 0) {
-        errors.push("响应缺少 invitees 或为空数组");
+        errors.push("Response missing 'invitees' or empty array");
       }
 
       if (errors.length > 0) {
-        console.log(`[ClawMeeting] initiate_meeting 响应校验警告: ${errors.join("; ")}`);
+        console.log(`[ClawMeeting] initiate_meeting response validation warnings: ${errors.join("; ")}`);
         return {
           success: false,
-          message: `会议创建请求已发送，但响应字段校验不通过: ${errors.join("; ")}`,
+          message: `Meeting creation request sent but response validation failed: ${errors.join("; ")}`,
           raw_response: result,
         };
       }
 
       return {
         success: true,
-        message: `会议协商已发起！`,
+        message: "Meeting negotiation initiated!",
         meeting_id: result.id,
         title: result.title,
         status: result.status,
@@ -171,14 +170,14 @@ export function createInitiateMeetingHandler(apiClient: ClawMeetingApiClient) {
           preference_note: finalNote,
         },
         next_step:
-          "服务端将通知受邀人的 OpenClaw 插件，等待他们提交空闲时间。您可以稍后通过轮询查看协商进展。",
+          "The server will notify invitees' OpenClaw plugins. They will submit their availability. You can check progress later via polling.",
       };
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
       return {
         success: false,
-        message: `发起会议失败: ${errMsg}`,
-        hint: "请确认服务端运行正常，且所有受邀人邮箱格式正确。",
+        message: `Failed to initiate meeting: ${errMsg}`,
+        hint: "Please verify the server is running and all invitee emails are valid.",
       };
     }
   };

@@ -1,44 +1,42 @@
 // ============================================================
 // Tool 4: ListMeetingsTool (list_meetings)
-// 对应 API 3 + API 4:
-//   GET /api/meetings              — 我的会议列表
-//   GET /api/meetings/{meeting_id} — 查询会议详情
+// API 3 + API 4:
+//   GET /api/meetings              — List my meetings
+//   GET /api/meetings/{meeting_id} — Get meeting details
 //
-// 用户说: "查看我的会议" / "会议详情" / "xxx会议怎么样了"
-// Agent 调用此工具查看会议列表或指定会议的详情
-//
-// 对齐 API_REFERENCE.md v1.0.0
+// User says: "show my meetings" / "meeting details" / "how's the xxx meeting going?"
+// Agent calls this tool to view meeting list or specific meeting details
 // ============================================================
 
 import type { ClawMeetingApiClient } from "../utils/api-client.js";
 
-/** Tool 的 JSON Schema 定义 */
+/** Tool JSON Schema definition */
 export const listMeetingsSchema = {
   name: "list_meetings",
   description: [
-    "查看用户参与的会议列表或指定会议的详情。",
+    "View the user's meeting list or details of a specific meeting.",
     "",
-    "模式 A - 不传 meeting_id：返回用户参与的所有会议（含发起的和被邀请的），按创建时间倒序。",
-    "模式 B - 传入 meeting_id：返回该会议的详细信息，包括各参与者的提交状态、协调推理等。",
+    "Mode A - No meeting_id: Returns all meetings the user is involved in (initiated and invited), sorted by creation time (newest first).",
+    "Mode B - With meeting_id: Returns detailed info for that meeting, including participant status, coordinator reasoning, etc.",
     "",
-    "用户可能说：",
-    "  - '查看我的会议'",
-    "  - 'xxx 会议怎么样了'",
-    "  - '会议详情'",
+    "The user might say:",
+    "  - 'show my meetings'",
+    "  - 'how's the xxx meeting going?'",
+    "  - 'meeting details'",
   ].join("\n"),
   parameters: {
     type: "object" as const,
     properties: {
       meeting_id: {
         type: "string" as const,
-        description: "会议 ID（可选）。不传则返回会议列表，传入则返回该会议详情。",
+        description: "Meeting ID (optional). If omitted, returns the meeting list. If provided, returns that meeting's details.",
       },
     },
     required: [],
   },
 };
 
-/** Tool 的处理函数 */
+/** Tool handler function */
 export function createListMeetingsHandler(apiClient: ClawMeetingApiClient) {
   return async (params: { meeting_id?: string }) => {
     const { meeting_id } = params;
@@ -46,11 +44,11 @@ export function createListMeetingsHandler(apiClient: ClawMeetingApiClient) {
     if (!apiClient.getToken()) {
       return {
         success: false,
-        message: "尚未完成身份绑定，请先调用 bind_identity 工具绑定邮箱。",
+        message: "Identity not bound yet. Please call bind_identity first.",
       };
     }
 
-    // 模式 B: 查询指定会议详情
+    // Mode B: Query specific meeting details
     if (meeting_id) {
       try {
         const detail = await apiClient.getMeetingDetail(meeting_id);
@@ -62,12 +60,12 @@ export function createListMeetingsHandler(apiClient: ClawMeetingApiClient) {
         const errMsg = error instanceof Error ? error.message : String(error);
         return {
           success: false,
-          message: `查询会议详情失败: ${errMsg}`,
+          message: `Failed to fetch meeting details: ${errMsg}`,
         };
       }
     }
 
-    // 模式 A: 查询会议列表
+    // Mode A: Query meeting list
     try {
       const list = await apiClient.getMeetingList();
       return {
@@ -79,7 +77,7 @@ export function createListMeetingsHandler(apiClient: ClawMeetingApiClient) {
       const errMsg = error instanceof Error ? error.message : String(error);
       return {
         success: false,
-        message: `查询会议列表失败: ${errMsg}`,
+        message: `Failed to fetch meeting list: ${errMsg}`,
       };
     }
   };

@@ -1,6 +1,6 @@
 {
   "name": "clawmeeting",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "type": "module",
   "description": "ClawMeeting - AI meeting negotiation agent plugin for OpenClaw",
   "main": "index.ts",
@@ -21,6 +21,14 @@
   ],
   "dependencies": {},
   "devDependencies": {},
-  "keywords": ["openclaw", "plugin", "meeting", "negotiation", "scheduling", "ai", "agent"],
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "meeting",
+    "negotiation",
+    "scheduling",
+    "ai",
+    "agent"
+  ],
   "license": "MIT"
 }
