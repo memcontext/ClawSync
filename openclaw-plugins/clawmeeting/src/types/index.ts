@@ -188,6 +188,8 @@ export interface SessionContext {
   sessionKey?: string;
   /** 消息来源渠道 (对应 SDK 中的 channelId) */
   channel?: string;
+  /** 投递目标（用于 message tool 直接发送，如手机号、chat ID 等） */
+  lastTo?: string;
 }
 
 // ---- 插件配置 ----

@@ -134,9 +134,74 @@ export default function register(api: any) {
   }
 
   // ============================================================
-  // 5. 主动推送消息到 session（通过 gateway HTTP API → sessions_send）
+  // 5. 主动推送消息
+  // 分流策略：
+  //   纯通知（不需要 LLM）→ message tool 直接发给用户，零 announce 风险
+  //   需要 Agent 处理     → sessions_send 触发 agent turn
+  //
+  // message tool 仅在正式 channel（telegram/feishu/discord 等）可用
+  // webchat 不支持 message tool → fallback 到 sessions_send
   // ============================================================
-  async function pushMessageToSession(message: string): Promise<boolean> {
+
+  /** 检测当前 session 的 channel 是否支持 message tool 直接发送 */
+  function getDirectMessageChannel(): { channel: string; target: string } | null {
+    const channel = sessionCtx.channel;
+    // webchat 不支持 message tool 主动推送
+    if (!channel || channel === "webchat") return null;
+    // 从 session store 获取上次的投递目标
+    const session = loadSession();
+    if (!session?.channel || !session?.lastTo) return null;
+    return { channel: session.channel, target: session.lastTo };
+  }
+
+  /**
+   * 推送纯通知（CONFIRMED/OVER/FAILED 等）
+   * 优先用 message tool 直接发（不经过 LLM，零泄露）
+   * 不支持时 fallback 到 sessions_send
+   */
+  async function pushNotification(message: string): Promise<boolean> {
+    if (!gatewayToken) return false;
+
+    // 尝试 message tool 直接发
+    const direct = getDirectMessageChannel();
+    if (direct) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${gatewayToken}`,
+          },
+          body: JSON.stringify({
+            tool: "message",
+            args: {
+              action: "send",
+              channel: direct.channel,
+              target: direct.target,
+              message,
+            },
+          }),
+        });
+        if (res.ok) {
+          console.log(`[ClawMeeting] 通知直接发送成功 (${direct.channel})`);
+          return true;
+        }
+        // message tool 失败，fallback 到 sessions_send
+        console.log(`[ClawMeeting] message tool 失败，fallback 到 sessions_send`);
+      } catch {
+        // fallback
+      }
+    }
+
+    // fallback: sessions_send（webchat 或 message tool 不可用时）
+    return pushAgentMessage(message);
+  }
+
+  /**
+   * 推送需要 Agent 处理的消息（INITIAL_SUBMIT/COUNTER_PROPOSAL 等）
+   * 必须走 sessions_send 触发 agent turn
+   */
+  async function pushAgentMessage(message: string): Promise<boolean> {
     if (!gatewayToken) return false;
 
     try {
@@ -156,16 +221,16 @@ export default function register(api: any) {
       });
 
       if (res.ok) {
-        console.log("[ClawMeeting] 主动推送通知成功");
+        console.log("[ClawMeeting] Agent 消息推送成功 (sessions_send)");
         return true;
       } else {
         const body = await res.text();
-        console.error(`[ClawMeeting] 主动推送失败: ${res.status} ${body}`);
+        console.error(`[ClawMeeting] Agent 消息推送失败: ${res.status} ${body}`);
         return false;
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[ClawMeeting] 主动推送出错: ${errMsg}`);
+      console.error(`[ClawMeeting] Agent 消息推送出错: ${errMsg}`);
       return false;
     }
   }
@@ -365,13 +430,37 @@ export default function register(api: any) {
       saveNotifiedMeetings([...notifiedMeetings]);
     }
 
-    // ==== 批量推送：所有通知合并为一条 system event ====
-    if (notifications.length > 0) {
-      const batchMessage = `[ClawMeeting Notifications]\n\n${notifications.join("\n\n---\n\n")}`;
-      const pushed = await pushMessageToSession(batchMessage);
+    // ==== 分流推送 ====
+    // 纯通知（CONFIRMED/OVER 等）和需要 Agent 处理的（INITIAL_SUBMIT/COUNTER_PROPOSAL/FAILED）分开推
+    const pureNotifications: string[] = [];   // 不需要 LLM → message tool 直接发
+    const agentNotifications: string[] = [];  // 需要 LLM → sessions_send
+
+    for (const n of notifications) {
+      // 判断是否需要 Agent 处理：包含 Invitation/Negotiation/Failed 关键词
+      if (n.includes("[ClawMeeting Meeting Invitation]")
+        || n.includes("[ClawMeeting Negotiation Update]")
+        || n.includes("[ClawMeeting Negotiation Failed]")) {
+        agentNotifications.push(n);
+      } else {
+        pureNotifications.push(n);
+      }
+    }
+
+    // 纯通知：优先 message tool 直接发（正式 channel），fallback sessions_send（webchat）
+    if (pureNotifications.length > 0) {
+      const batchMsg = pureNotifications.join("\n\n---\n\n");
+      const pushed = await pushNotification(batchMsg);
       if (!pushed) {
-        // fallback: 放入 pendingNotifications，等用户下次交互时展示
-        userMessages.push(...notifications);
+        userMessages.push(...pureNotifications);
+      }
+    }
+
+    // 需要 Agent 处理：走 sessions_send 触发 agent turn
+    if (agentNotifications.length > 0) {
+      const batchMsg = `[ClawMeeting Notifications]\n\n${agentNotifications.join("\n\n---\n\n")}`;
+      const pushed = await pushAgentMessage(batchMsg);
+      if (!pushed) {
+        userMessages.push(...agentNotifications);
       }
     }
 
@@ -543,7 +632,7 @@ export default function register(api: any) {
           console.log(`自动响应: ${pluginConfig.autoRespond ? "开启" : "关闭"}`);
           console.log(`轮询状态: ${pollingManager.isRunning() ? "运行中" : "已停止"}`);
           console.log(`已通知会议数: ${notifiedMeetings.size}`);
-          console.log(`主动推送: system event (内置)`);
+          console.log(`主动推送: ${gatewayToken ? "可用 (分流: message + sessions_send)" : "不可用"}`);
           if (creds?.email) {
             console.log(`已绑定邮箱: ${creds.email}`);
           }
@@ -572,10 +661,13 @@ export default function register(api: any) {
         && !sessionKey.includes(":run:")
         && !sessionKey.includes(":subagent:");
 
-      if (isMainSession && sessionKey !== sessionCtx?.sessionKey) {
-        sessionCtx = { sessionKey, channel };
-        saveSession(sessionCtx);
-        console.log(`[ClawMeeting] session 已更新: ${sessionKey}`);
+      if (isMainSession) {
+        const to = ctx?.originatingTo ?? ctx?.to ?? ctx?.peerId ?? undefined;
+        if (sessionKey !== sessionCtx?.sessionKey || channel !== sessionCtx?.channel || to !== sessionCtx?.lastTo) {
+          sessionCtx = { sessionKey, channel, lastTo: to };
+          saveSession(sessionCtx);
+          console.log(`[ClawMeeting] session 已更新: ${sessionKey} channel=${channel} to=${to}`);
+        }
       }
 
       // 非主 session 不注入 system prompt，节省 token
