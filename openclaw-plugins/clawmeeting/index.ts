@@ -234,6 +234,7 @@ export default function register(api: any) {
           args: {
             sessionKey: sessionCtx.sessionKey ?? "agent:main:main",
             message,
+            delivery: { mode: "none" },
           },
         }),
         signal: controller.signal,
