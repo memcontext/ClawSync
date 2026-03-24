@@ -167,10 +167,7 @@ export default function register(api: any) {
    * 失败时放入 pendingNotifications 兜底
    */
   async function pushNotification(message: string): Promise<boolean> {
-    if (!gatewayToken) {
-      pendingNotifications.push(message);
-      return false;
-    }
+    if (!gatewayToken) return false;
 
     // 尝试 message tool 直接发
     const direct = getDirectMessageChannel();
@@ -212,10 +209,7 @@ export default function register(api: any) {
    * 失败/超时时放入 pendingNotifications，用户下次说话时 Agent 优先处理
    */
   async function pushAgentMessage(message: string): Promise<boolean> {
-    if (!gatewayToken) {
-      pendingNotifications.push(message);
-      return false;
-    }
+    if (!gatewayToken) return false;
     return sendViaSessionsSend(message);
   }
 
@@ -253,16 +247,12 @@ export default function register(api: any) {
       } else {
         const body = await res.text();
         console.error(`[ClawMeeting] 推送失败: ${res.status} ${body}`);
-        // 失败 → 放入兜底
-        pendingNotifications.push(message);
         return false;
       }
     } catch (err) {
       clearTimeout(timeout);
       const errMsg = err instanceof Error ? err.message : String(err);
-      // 超时或网络错误 → 放入兜底
-      pendingNotifications.push(message);
-      console.log(`[ClawMeeting] sessions_send 未完成 (${errMsg})，已放入 pendingNotifications 兜底`);
+      console.log(`[ClawMeeting] sessions_send 未完成 (${errMsg})，将由 pendingNotifications 兜底`);
       return false;
     }
   }
