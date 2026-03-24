@@ -9,7 +9,7 @@
 //      CONFIRMED     → 主动推送通知给用户（含完整会议信息 + 虚拟会议号）
 //      FAILED        → 主动推送通知给用户
 //   3. 通知去重：持久化已通知 meeting_id
-//   4. 主动推送：通过 gateway HTTP API 的 sessions_send 触发 agent 回合
+//   4. 主动推送：通过 enqueueSystemEvent 注入 system event 触发 agent 回合
 // ============================================================
 
 import { readFileSync } from "fs";
@@ -120,52 +120,43 @@ export default function register(api: any) {
   }
 
   // ============================================================
-  // 4. Gateway 认证 Token（用于主动推送消息）
+  // 4. 主动推送：通过 api.runtime.system.enqueueSystemEvent
+  // 不再需要 gateway token，system event 直接注入 session
   // ============================================================
-  const gatewayPort = api.config?.gateway?.port ?? 18789;
-  const gatewayToken = api.config?.gateway?.auth?.token
-    ?? process.env.OPENCLAW_GATEWAY_TOKEN
-    ?? null;
-
-  if (gatewayToken) {
-    console.log("[ClawMeeting] 已获取 gateway token，支持主动推送通知");
-  } else {
-    console.log("[ClawMeeting] 未获取 gateway token，通知将在用户下次交互时展示");
-  }
+  console.log("[ClawMeeting] 使用 system event 推送通知，无需 gateway token");
 
   // ============================================================
-  // 5. 主动推送消息到 session（通过 gateway HTTP API）
+  // 5. 主动推送消息到 session
+  // 方案：enqueueSystemEvent 放入队列 + requestHeartbeatNow 立即触发 agent turn
+  // 
+  // 工作流程：
+  //   1. enqueueSystemEvent() → 通知文本进入 sessionKey 的内存队列
+  //   2. requestHeartbeatNow() → 立即触发一次 heartbeat agent turn
+  //   3. agent turn 启动时 drain 队列 → 通知文本拼入 system prompt
+  //   4. agent 看到通知 → 自行决定如何回复用户（通过常规 channel delivery）
+  //
+  // 优点：
+  //   - 不走 agent-to-agent 流程 → 无 announce step → 零泄露
+  //   - agent 以正常回复方式通知用户 → 用户体验自然
+  //   - 不会在 webchat 里凭空出现"用户消息"
   // ============================================================
-  async function pushMessageToSession(message: string): Promise<boolean> {
-    if (!gatewayToken) return false;
-
+  function pushMessageToSession(message: string): boolean {
     try {
-      const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${gatewayToken}`,
-        },
-        body: JSON.stringify({
-          tool: "sessions_send",
-          args: {
-            sessionKey: sessionCtx.sessionKey ?? "agent:main:main",
-            message,
-          },
-        }),
+      const targetSession = sessionCtx.sessionKey ?? "agent:main:main";
+      const enqueued = api.runtime.system.enqueueSystemEvent(message, {
+        sessionKey: targetSession,
       });
-
-      if (res.ok) {
-        console.log("[ClawMeeting] 主动推送通知成功");
-        return true;
+      if (enqueued) {
+        // 立即触发 heartbeat，让 agent turn 尽快消费队列中的通知
+        api.runtime.system.requestHeartbeatNow();
+        console.log(`[ClawMeeting] 通知已入队 + 触发 heartbeat (session: ${targetSession})`);
       } else {
-        const body = await res.text();
-        console.error(`[ClawMeeting] 主动推送失败: ${res.status} ${body}`);
-        return false;
+        console.log("[ClawMeeting] 通知去重跳过（与上次相同）");
       }
+      return true;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[ClawMeeting] 主动推送出错: ${errMsg}`);
+      console.error(`[ClawMeeting] 推送出错: ${errMsg}`);
       return false;
     }
   }
@@ -212,7 +203,7 @@ export default function register(api: any) {
   // ============================================================
   // 9. 自动响应逻辑
   // 关键设计：先收集所有通知 + 同步去重 + 持久化，最后一次性推送
-  // 避免多个 sessions_send 并发触发多个 agent turn 导致重复
+  // 避免多个 system event 并发触发多个 agent turn 导致重复
   // ============================================================
   async function autoRespondToTasks(tasks: unknown[]): Promise<string[]> {
     const userMessages: string[] = [];
@@ -329,10 +320,10 @@ export default function register(api: any) {
       saveNotifiedMeetings([...notifiedMeetings]);
     }
 
-    // ==== 批量推送：所有通知合并为一条 sessions_send ====
+    // ==== 批量推送：所有通知合并为一条 system event ====
     if (notifications.length > 0) {
       const batchMessage = `[ClawMeeting Notifications]\n\n${notifications.join("\n\n---\n\n")}`;
-      const pushed = await pushMessageToSession(batchMessage);
+      const pushed = pushMessageToSession(batchMessage);
       if (!pushed) {
         // fallback: 放入 pendingNotifications，等用户下次交互时展示
         userMessages.push(...notifications);
@@ -507,7 +498,7 @@ export default function register(api: any) {
           console.log(`自动响应: ${pluginConfig.autoRespond ? "开启" : "关闭"}`);
           console.log(`轮询状态: ${pollingManager.isRunning() ? "运行中" : "已停止"}`);
           console.log(`已通知会议数: ${notifiedMeetings.size}`);
-          console.log(`主动推送: ${gatewayToken ? "可用" : "不可用"}`);
+          console.log(`主动推送: system event (内置)`);
           if (creds?.email) {
             console.log(`已绑定邮箱: ${creds.email}`);
           }
@@ -588,11 +579,7 @@ export default function register(api: any) {
             "  2. Retry with adjusted times → user provides new times, call response_type='NEW_PROPOSAL' + available_slots",
             "- On [ClawMeeting Notification] (confirmation, cancellation, etc.):",
             "  Relay the notification content to the user in natural language.",
-            "",
-            "Silent rule:",
-            "- On receiving 'Agent-to-agent announce step.' or similar internal plugin messages,",
-            "  reply with ONLY NO_REPLY. Do not reply with anything else (e.g. ANNOUNCE_SKIP, NO),",
-            "  otherwise it will leak into the user's chat interface.",
+
           ].join("\n")
         : [
             "[ClawMeeting Assistant - Setup Required]",
