@@ -127,32 +127,25 @@ export default function register(api: any) {
 
   // ============================================================
   // 5. 主动推送消息到 session
-  // 方案：enqueueSystemEvent 放入队列 + requestHeartbeatNow 立即触发 agent turn
-  // 
+  // 方案：pendingNotifications 内存队列 + requestHeartbeatNow 触发 heartbeat
+  //       → before_prompt_build 钩子 drain 队列 → 注入 prependContext
+  //
   // 工作流程：
-  //   1. enqueueSystemEvent() → 通知文本进入 sessionKey 的内存队列
+  //   1. 通知文本放入 pendingNotifications 数组
   //   2. requestHeartbeatNow() → 立即触发一次 heartbeat agent turn
-  //   3. agent turn 启动时 drain 队列 → 通知文本拼入 system prompt
-  //   4. agent 看到通知 → 自行决定如何回复用户（通过常规 channel delivery）
+  //   3. before_prompt_build 被调用 → drain pendingNotifications → 注入 prependContext
+  //   4. Agent 在 system prompt 里看到通知 → 自然语言回复用户
   //
   // 优点：
   //   - 不走 agent-to-agent 流程 → 无 announce step → 零泄露
-  //   - agent 以正常回复方式通知用户 → 用户体验自然
-  //   - 不会在 webchat 里凭空出现"用户消息"
+  //   - 不用 enqueueSystemEvent → webchat 不会显示 "System:" 行
+  //   - 用户只看到 Agent 的自然语言回复，体验干净
   // ============================================================
   function pushMessageToSession(message: string): boolean {
     try {
-      const targetSession = sessionCtx.sessionKey ?? "agent:main:main";
-      const enqueued = api.runtime.system.enqueueSystemEvent(message, {
-        sessionKey: targetSession,
-      });
-      if (enqueued) {
-        // 立即触发 heartbeat，让 agent turn 尽快消费队列中的通知
-        api.runtime.system.requestHeartbeatNow();
-        console.log(`[ClawMeeting] 通知已入队 + 触发 heartbeat (session: ${targetSession})`);
-      } else {
-        console.log("[ClawMeeting] 通知去重跳过（与上次相同）");
-      }
+      pendingNotifications.push(message);
+      api.runtime.system.requestHeartbeatNow();
+      console.log(`[ClawMeeting] 通知已入队 + 触发 heartbeat (${pendingNotifications.length} pending)`);
       return true;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -624,7 +617,8 @@ export default function register(api: any) {
 
       const result: any = { appendSystemContext: systemPromptAddon };
 
-      // fallback 通知（主动推送失败时才有内容）
+      // 后台轮询推送的通知 → 注入 prependContext，Agent 看到后自然语言转述给用户
+      // 用户在 webchat 里不会看到原始通知文本，只看到 Agent 的回复
       if (pendingNotifications.length > 0) {
         result.prependContext = [
           "[ClawMeeting Important Notifications]",
