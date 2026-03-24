@@ -47,7 +47,7 @@ export const initiateMeetingSchema = {
         items: { type: "string" as const },
         description: [
           "Organizer's available time slots (required). Parse from the user's natural language description.",
-          "Format: 'YYYY-MM-DD HH:MM-HH:MM', e.g. '2026-03-20 14:00-17:00'.",
+          "Format: 'YYYY-MM-DD HH:MM-HH:MM', e.g. '2026-03-20 14:00-17:00'. Time range 00:00-23:59, never use 24:00.",
           "The user might say 'tomorrow 2pm to 5pm' — convert to a concrete date and time.",
           "Multiple time slots are allowed.",
         ].join(" "),

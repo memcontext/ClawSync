@@ -76,11 +76,11 @@ export const checkAndRespondTasksSchema = {
           properties: {
             start: {
               type: "string" as const,
-              description: "Slot start time, format: '2026-03-18 14:00'",
+              description: "Slot start time, format: 'YYYY-MM-DD HH:MM' (00:00-23:59, never use 24:00)",
             },
             end: {
               type: "string" as const,
-              description: "Slot end time, format: '2026-03-18 16:00'",
+              description: "Slot end time, format: 'YYYY-MM-DD HH:MM' (00:00-23:59, never use 24:00)",
             },
           },
           required: ["start", "end"],
