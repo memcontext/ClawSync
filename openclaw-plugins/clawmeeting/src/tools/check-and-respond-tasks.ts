@@ -122,13 +122,14 @@ function buildInitialSubmitInfo(task: PendingTask): object {
       "Please tell me when you're available and I'll submit for you.",
     ].join("\n"),
     instruction: [
-      "Received a meeting invitation. Need to submit available time slots.",
-      "【Important】First show display_to_user content to the user, including the organizer's proposed slots.",
-      "Then select suitable time slots based on your memory of the user and their calendar.",
-      "Memory may contain not only meeting preferences and habits, but also schedule info the user mentioned ",
-      "(business trips, doctor appointments, picking up kids, dinner plans, etc.) — these may not be on the calendar, so consider avoiding them too.",
-      "Then call this tool to submit: meeting_id, response_type='INITIAL', available_slots.",
-      "If you cannot determine the user's availability, ask the user directly.",
+      "Received a meeting invitation. Need to submit available time slots. ",
+      "【Important】First show display_to_user content to the user, including the organizer's proposed slots. ",
+      "Then follow this exact order: ",
+      "Step 1: Check if the user has a connected calendar. If yes, you MUST query it to get their real schedule. ",
+      "Step 2: Check your memory for schedule info the user mentioned (business trips, doctor appointments, picking up kids, dinner plans, etc.) and meeting preferences. ",
+      "Step 3: Combine calendar data (if available) + memory clues + organizer's proposed slots to select suitable times. ",
+      "Then call this tool to submit: meeting_id, response_type='INITIAL', available_slots. ",
+      "Only ask the user if they have NO connected calendar AND your memory has NO schedule info at all.",
     ].join(""),
   };
 }
