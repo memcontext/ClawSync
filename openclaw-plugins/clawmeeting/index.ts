@@ -126,46 +126,36 @@ export default function register(api: any) {
   console.log("[ClawMeeting] 使用 system event 推送通知，无需 gateway token");
 
   // ============================================================
-  // 5. 主动推送消息到 session
-  // 方案：pendingNotifications 内存队列 + cron wake event 触发 agent turn
+  // 5. 主动推送消息到 session（通过 enqueueSystemEvent）
   //
-  // 工作流程：
-  //   1. 通知文本放入 pendingNotifications 数组（插件内存）
-  //   2. cron wake event → 在 main session 触发一个正常 agent turn
-  //   3. before_prompt_build 被调用 → drain pendingNotifications → 注入 prependContext
-  //   4. Agent 在 system prompt 里看到通知 → 自然语言回复用户
-  //   5. 正常 agent turn → 回复通过常规 channel delivery 投递
+  // 使用 system event 注入 session + requestHeartbeatNow 触发 agent turn。
+  // system event 会在 webchat 里显示 "System:" 前缀的行，但这是目前唯一
+  // 能可靠触发 agent turn 并保证回复投递的方案。
   //
-  // 为什么不用 heartbeat：
-  //   heartbeat.target 默认 "none"，回复不投递到 channel
-  // 为什么不用 enqueueSystemEvent：
-  //   webchat 会显示 "System:" 气泡，用户体验差
-  // 为什么不用 sessions_send：
-  //   走 agent-to-agent 流程，有 announce step 泄露风险
+  // 尝试过但不可行的方案：
+  //   - sessions_send: agent-to-agent 流程，有 announce step 泄露
+  //   - pendingNotifications + prependContext + heartbeat: heartbeat 不可靠触发，
+  //     即使触发了 Agent 可能回复 HEARTBEAT_OK 导致回复被吞
+  //   - HTTP /cron/wake: 端点不存在（是 WebSocket RPC）
   // ============================================================
   function pushMessageToSession(message: string): boolean {
     try {
-      pendingNotifications.push(message);
-      // requestHeartbeatNow 触发 heartbeat agent turn
-      // 需要 heartbeat.target = "last" 才能投递回复到 channel
-      // 插件在 register 时会自动检查并提示配置
-      api.runtime.system.requestHeartbeatNow();
-      console.log(`[ClawMeeting] 通知已入队 + 触发 heartbeat (${pendingNotifications.length} pending)`);
+      const targetSession = sessionCtx.sessionKey ?? "agent:main:main";
+      const enqueued = api.runtime.system.enqueueSystemEvent(message, {
+        sessionKey: targetSession,
+      });
+      if (enqueued) {
+        api.runtime.system.requestHeartbeatNow();
+        console.log(`[ClawMeeting] 通知已入队 system event + 触发 heartbeat (session: ${targetSession})`);
+      } else {
+        console.log("[ClawMeeting] 通知去重跳过（与上次相同）");
+      }
       return true;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[ClawMeeting] 推送出错: ${errMsg}`);
       return false;
     }
-  }
-
-  // 检查 heartbeat.target 配置，没设置则警告
-  const heartbeatTarget = api.config?.agents?.defaults?.heartbeat?.target;
-  if (!heartbeatTarget || heartbeatTarget === "none") {
-    console.warn(
-      '[ClawMeeting] ⚠️ heartbeat.target 未设置或为 "none"，后台通知将无法主动推送到用户。',
-      '请在 openclaw.json 中设置 agents.defaults.heartbeat.target: "last"',
-    );
   }
 
   // ============================================================
