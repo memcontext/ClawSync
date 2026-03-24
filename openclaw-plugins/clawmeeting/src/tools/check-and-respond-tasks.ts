@@ -357,6 +357,17 @@ export function createCheckAndRespondTasksHandler(
               instruction: "会议协商失败，请通知用户。",
             });
             break;
+          case "MEETING_OVER":
+            results.push({
+              meeting_id: task.meeting_id,
+              title: task.title,
+              action: "NOTIFY_USER",
+              task_type: task.task_type,
+              initiator: task.initiator,
+              message: task.message,
+              instruction: "会议已结束，请通知用户。",
+            });
+            break;
           default:
             console.log(
               `[ClawMeeting] 未识别的 task_type: "${task.task_type}", meeting_id=${task.meeting_id}`,

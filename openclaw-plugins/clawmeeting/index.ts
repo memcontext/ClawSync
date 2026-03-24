@@ -77,7 +77,15 @@ function readPluginId(): string {
   }
 }
 
+// ---- 单例守卫：防止框架多次调用 register 导致重复加载 ----
+let _registered = false;
+
 export default function register(api: any) {
+  if (_registered) {
+    return;
+  }
+  _registered = true;
+
   const PLUGIN_ID = readPluginId();
 
   // ============================================================
@@ -346,8 +354,8 @@ export default function register(api: any) {
       const taskResults = (result as any).task_results ?? [];
       const newTasks = taskResults.filter((t: any) => {
         const tt = t.task_type;
-        // CONFIRMED：纯通知去重
-        if (tt === "MEETING_CONFIRMED") {
+        // CONFIRMED/OVER：纯通知去重
+        if (tt === "MEETING_CONFIRMED" || tt === "MEETING_OVER") {
           return !notifiedMeetings.has(t.meeting_id);
         }
         // FAILED：需要发起人决策，用 pendingDecisions 去重
