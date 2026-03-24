@@ -158,8 +158,13 @@ export default function register(api: any) {
    * 推送纯通知（CONFIRMED/OVER/FAILED 等）
    * 优先用 message tool 直接发（不经过 LLM，零泄露）
    * 不支持时 fallback 到 sessions_send
+   * 无论成功与否，都放入 pendingNotifications 兜底
    */
   async function pushNotification(message: string): Promise<boolean> {
+    // 无论推送是否成功，都放入 pendingNotifications
+    // 用户下次说话时 before_prompt_build 会 drain 并注入 prependContext
+    pendingNotifications.push(message);
+
     if (!gatewayToken) return false;
 
     // 尝试 message tool 直接发
@@ -183,26 +188,41 @@ export default function register(api: any) {
           }),
         });
         if (res.ok) {
+          // 直接发送成功 → 清掉刚加的 pendingNotifications（已送达，不需要重复）
+          const idx = pendingNotifications.lastIndexOf(message);
+          if (idx >= 0) pendingNotifications.splice(idx, 1);
           console.log(`[ClawMeeting] 通知直接发送成功 (${direct.channel})`);
           return true;
         }
-        // message tool 失败，fallback 到 sessions_send
         console.log(`[ClawMeeting] message tool 失败，fallback 到 sessions_send`);
       } catch {
         // fallback
       }
     }
 
-    // fallback: sessions_send（webchat 或 message tool 不可用时）
-    return pushAgentMessage(message);
+    // fallback: 尝试 sessions_send（不阻塞，设超时）
+    return sendViaSessionsSend(message);
   }
 
   /**
    * 推送需要 Agent 处理的消息（INITIAL_SUBMIT/COUNTER_PROPOSAL 等）
-   * 必须走 sessions_send 触发 agent turn
+   * 走 sessions_send 触发 agent turn
+   * 同时放入 pendingNotifications 兜底（session 占用时用户下次说话也能看到）
    */
   async function pushAgentMessage(message: string): Promise<boolean> {
+    // 兜底：无论 sessions_send 是否成功，用户下次 agent turn 时都能看到
+    pendingNotifications.push(message);
+
     if (!gatewayToken) return false;
+    return sendViaSessionsSend(message);
+  }
+
+  /**
+   * 通过 sessions_send 发送，带超时（避免 session 占用时无限阻塞）
+   */
+  async function sendViaSessionsSend(message: string): Promise<boolean> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000); // 15 秒超时
 
     try {
       const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
@@ -218,19 +238,27 @@ export default function register(api: any) {
             message,
           },
         }),
+        signal: controller.signal,
       });
 
+      clearTimeout(timeout);
+
       if (res.ok) {
-        console.log("[ClawMeeting] Agent 消息推送成功 (sessions_send)");
+        // sessions_send 成功 → 清掉 pendingNotifications 中对应的条目
+        const idx = pendingNotifications.lastIndexOf(message);
+        if (idx >= 0) pendingNotifications.splice(idx, 1);
+        console.log("[ClawMeeting] 推送成功 (sessions_send)");
         return true;
       } else {
         const body = await res.text();
-        console.error(`[ClawMeeting] Agent 消息推送失败: ${res.status} ${body}`);
+        console.error(`[ClawMeeting] 推送失败: ${res.status} ${body}`);
         return false;
       }
     } catch (err) {
+      clearTimeout(timeout);
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[ClawMeeting] Agent 消息推送出错: ${errMsg}`);
+      // 超时或网络错误 → pendingNotifications 里已有兜底
+      console.log(`[ClawMeeting] sessions_send 未完成 (${errMsg})，通知已在 pendingNotifications 兜底`);
       return false;
     }
   }
