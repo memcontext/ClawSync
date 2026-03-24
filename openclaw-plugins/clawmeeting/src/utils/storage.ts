@@ -132,3 +132,23 @@ export function loadSession(): SessionContext | null {
     return null;
   }
 }
+
+// ---- Telegram Session 上下文 ----
+// 单独持久化 Telegram 渠道的 session，叠加推送用
+
+export function saveTelegramCtx(ctx: SessionContext): void {
+  ensureDir();
+  const filePath = join(STORAGE_DIR, "telegram-ctx.json");
+  writeFileSync(filePath, JSON.stringify(ctx, null, 2), "utf-8");
+}
+
+export function loadTelegramCtx(): SessionContext | null {
+  const filePath = join(STORAGE_DIR, "telegram-ctx.json");
+  if (!existsSync(filePath)) return null;
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    return JSON.parse(raw) as SessionContext;
+  } catch {
+    return null;
+  }
+}

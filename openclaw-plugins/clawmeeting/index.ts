@@ -24,6 +24,8 @@ import {
   saveNotifiedMeetings,
   loadPendingDecisions,
   savePendingDecisions,
+  saveTelegramCtx,
+  loadTelegramCtx,
 } from "./src/utils/storage.js";
 import { PollingManager } from "./src/utils/polling-manager.js";
 
@@ -119,6 +121,12 @@ export default function register(api: any) {
     console.log(`[ClawMeeting] session: ${sessionCtx.sessionKey}`);
   }
 
+  // Telegram 渠道 session（叠加推送，不影响主 session 逻辑）
+  let telegramCtx: SessionContext | null = loadTelegramCtx();
+  if (telegramCtx) {
+    console.log(`[ClawMeeting] 已恢复 Telegram ctx: to=${telegramCtx.lastTo}`);
+  }
+
   // ============================================================
   // 4. Gateway 认证 Token（用于主动推送消息）
   // ============================================================
@@ -200,7 +208,10 @@ export default function register(api: any) {
     }
 
     // fallback: sessions_send
-    return sendViaSessionsSend(message);
+    const result = await sendViaSessionsSend(message);
+    // 叠加推送到 Telegram（不影响主渠道结果）
+    await pushToTelegram(message);
+    return result;
   }
 
   /**
@@ -210,7 +221,10 @@ export default function register(api: any) {
    */
   async function pushAgentMessage(message: string): Promise<boolean> {
     if (!gatewayToken) return false;
-    return sendViaSessionsSend(message);
+    const result = await sendViaSessionsSend(message);
+    // 叠加推送到 Telegram（不影响主渠道结果）
+    await pushToTelegram(message);
+    return result;
   }
 
   /**
@@ -255,6 +269,39 @@ export default function register(api: any) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.log(`[ClawMeeting] sessions_send 未完成 (${errMsg})，将由 pendingNotifications 兜底`);
       return false;
+    }
+  }
+
+  /**
+   * 叠加推送到 Telegram（不影响主渠道逻辑）
+   * 仅在 telegramCtx 存在时触发，失败静默忽略
+   */
+  async function pushToTelegram(message: string): Promise<void> {
+    if (!telegramCtx?.lastTo || !gatewayToken) return;
+    try {
+      const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${gatewayToken}`,
+        },
+        body: JSON.stringify({
+          tool: "message",
+          args: {
+            action: "send",
+            channel: "telegram",
+            target: telegramCtx.lastTo,
+            message,
+          },
+        }),
+      });
+      if (res.ok) {
+        console.log("[ClawMeeting] Telegram 叠加推送成功");
+      } else {
+        console.log(`[ClawMeeting] Telegram 推送失败: ${res.status}`);
+      }
+    } catch (e) {
+      console.log("[ClawMeeting] Telegram 推送异常:", e);
     }
   }
 
@@ -690,6 +737,16 @@ export default function register(api: any) {
           sessionCtx = { sessionKey, channel, lastTo: to };
           saveSession(sessionCtx);
           console.log(`[ClawMeeting] session 已更新: ${sessionKey} channel=${channel} to=${to}`);
+        }
+
+        // 捕获 Telegram 渠道 ctx（叠加推送用）
+        if (channel === "telegram") {
+          const to = ctx?.originatingTo ?? ctx?.to ?? ctx?.peerId ?? undefined;
+          if (to && to !== telegramCtx?.lastTo) {
+            telegramCtx = { sessionKey, channel, lastTo: to };
+            saveTelegramCtx(telegramCtx);
+            console.log(`[ClawMeeting] Telegram ctx 已更新: to=${to}`);
+          }
         }
       }
 
