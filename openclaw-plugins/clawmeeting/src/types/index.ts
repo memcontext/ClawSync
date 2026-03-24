@@ -186,10 +186,8 @@ export interface CalendarSlot {
 export interface SessionContext {
   /** OpenClaw session key, e.g. "agent:main:webchat:dm:alice" */
   sessionKey?: string;
-  /** 消息来源渠道 */
+  /** 消息来源渠道 (对应 SDK 中的 channelId) */
   channel?: string;
-  /** 对话对象标识 */
-  peerId?: string;
 }
 
 // ---- 插件配置 ----

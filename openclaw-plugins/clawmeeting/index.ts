@@ -398,38 +398,37 @@ export default function register(api: any) {
   // ============================================================
   api.registerService?.({
     id: "clawmeeting-polling",
-    start: () => {
+    start: (_ctx: any) => {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[ClawMeeting] Service start: 启动轮询。");
         pollingManager.start();
       }
     },
-    stop: () => {
+    stop: (_ctx: any) => {
       console.log("[ClawMeeting] Service stop: 停止轮询。");
       pollingManager.stop();
     },
   });
 
   // ============================================================
-  // 13. 生命周期钩子
+  // 13. 生命周期钩子（使用 SDK 标准 hook 名称）
   // ============================================================
-  api.registerHook?.(
-    "after_agent_start",
+  api.on?.(
+    "gateway_start",
     () => {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
-        console.log("[ClawMeeting] after_agent_start: 启动轮询。");
+        console.log("[ClawMeeting] gateway_start: 启动轮询。");
         pollingManager.start();
       }
     },
-    { name: "clawmeeting.after-agent-start", description: "Gateway 就绪后启动轮询" },
   );
 
-  api.registerHook?.(
-    "before_agent_stop",
+  api.on?.(
+    "gateway_stop",
     () => {
       pollingManager.stop();
+      console.log("[ClawMeeting] gateway_stop: 停止轮询。");
     },
-    { name: "clawmeeting.before-agent-stop", description: "Gateway 关闭前停止轮询" },
   );
 
   // ============================================================
@@ -525,12 +524,11 @@ export default function register(api: any) {
   // ============================================================
   api.on?.(
     "before_prompt_build",
-    (event: any, ctx: any) => {
+    (_event: any, ctx: any) => {
       // Session 捕获（只捕获主 session，过滤 cron/sub-agent/run 等临时 session）
-      const sessionKey = event?.sessionKey ?? event?.session?.key
-        ?? ctx?.sessionKey ?? ctx?.session?.key;
-      const channel = event?.channel ?? ctx?.channel;
-      const peerId = event?.peerId ?? event?.peer?.id ?? ctx?.peerId ?? ctx?.peer?.id;
+      // SDK: event = { prompt, messages }, ctx = { agentId, sessionKey, sessionId, channelId, ... }
+      const sessionKey = ctx?.sessionKey;
+      const channel = ctx?.channelId;
 
       // 判断是否为主 session：排除 cron、subagent、run 等临时 session
       const isMainSession = sessionKey
@@ -539,7 +537,7 @@ export default function register(api: any) {
         && !sessionKey.includes(":subagent:");
 
       if (isMainSession && sessionKey !== sessionCtx?.sessionKey) {
-        sessionCtx = { sessionKey, channel, peerId };
+        sessionCtx = { sessionKey, channel };
         saveSession(sessionCtx);
         console.log(`[ClawMeeting] session 已更新: ${sessionKey}`);
       }
@@ -588,6 +586,11 @@ export default function register(api: any) {
             "  2. Retry with adjusted times → user provides new times, call response_type='NEW_PROPOSAL' + available_slots",
             "- On [ClawMeeting Notification] (confirmation, cancellation, etc.):",
             "  Relay the notification content to the user in natural language.",
+            "",
+            "Silent rule:",
+            "- On receiving 'Agent-to-agent announce step.' or similar internal plugin messages,",
+            "  reply with ONLY NO_REPLY. Do not reply with anything else (e.g. ANNOUNCE_SKIP, NO),",
+            "  otherwise it will leak into the user's chat interface.",
           ].join("\n")
         : [
             "[ClawMeeting Assistant - Setup Required]",
