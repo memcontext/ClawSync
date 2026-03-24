@@ -143,38 +143,29 @@ export default function register(api: any) {
   // 为什么不用 sessions_send：
   //   走 agent-to-agent 流程，有 announce step 泄露风险
   // ============================================================
-  const gatewayPort = api.config?.gateway?.port ?? 18789;
-  const gatewayToken = api.config?.gateway?.auth?.token
-    ?? process.env.OPENCLAW_GATEWAY_TOKEN
-    ?? null;
-
-  async function pushMessageToSession(message: string): Promise<boolean> {
+  function pushMessageToSession(message: string): boolean {
     try {
       pendingNotifications.push(message);
-
-      // 通过 cron wake event 触发 main session 的 agent turn
-      if (gatewayToken) {
-        const wakeText = "[ClawMeeting] New notifications pending. Check and relay to user.";
-        await fetch(`http://127.0.0.1:${gatewayPort}/cron/wake`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${gatewayToken}`,
-          },
-          body: JSON.stringify({ text: wakeText, mode: "now" }),
-        });
-        console.log(`[ClawMeeting] 通知已入队 + wake event sent (${pendingNotifications.length} pending)`);
-      } else {
-        // 没有 gateway token 时 fallback 到 heartbeat（可能不投递，但总比没有好）
-        api.runtime.system.requestHeartbeatNow();
-        console.log(`[ClawMeeting] 通知已入队 + heartbeat fallback (${pendingNotifications.length} pending)`);
-      }
+      // requestHeartbeatNow 触发 heartbeat agent turn
+      // 需要 heartbeat.target = "last" 才能投递回复到 channel
+      // 插件在 register 时会自动检查并提示配置
+      api.runtime.system.requestHeartbeatNow();
+      console.log(`[ClawMeeting] 通知已入队 + 触发 heartbeat (${pendingNotifications.length} pending)`);
       return true;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[ClawMeeting] 推送出错: ${errMsg}`);
       return false;
     }
+  }
+
+  // 检查 heartbeat.target 配置，没设置则警告
+  const heartbeatTarget = api.config?.agents?.defaults?.heartbeat?.target;
+  if (!heartbeatTarget || heartbeatTarget === "none") {
+    console.warn(
+      '[ClawMeeting] ⚠️ heartbeat.target 未设置或为 "none"，后台通知将无法主动推送到用户。',
+      '请在 openclaw.json 中设置 agents.defaults.heartbeat.target: "last"',
+    );
   }
 
   // ============================================================
@@ -375,7 +366,7 @@ export default function register(api: any) {
     // ==== 批量推送：所有通知合并为一条 system event ====
     if (notifications.length > 0) {
       const batchMessage = `[ClawMeeting Notifications]\n\n${notifications.join("\n\n---\n\n")}`;
-      const pushed = await pushMessageToSession(batchMessage);
+      const pushed = pushMessageToSession(batchMessage);
       if (!pushed) {
         // fallback: 放入 pendingNotifications，等用户下次交互时展示
         userMessages.push(...notifications);
