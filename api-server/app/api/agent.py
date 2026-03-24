@@ -203,6 +203,21 @@ async def submit_coordination_result(
                         log.suggested_slots = None
                     log.updated_at = datetime.utcnow()
 
+                # 防止状态卡死：如果所有人都已完成（无人需要操作），直接转入 ANALYZING
+                all_done = all(not log.action_required for log in logs)
+                if all_done:
+                    reanalyze_state = state_machine.transition(
+                        current=MeetingState.COLLECTING,
+                        target=MeetingState.ANALYZING,
+                        context={"meeting_id": meeting_id}
+                    )
+                    meeting.status = reanalyze_state.value
+                    meeting.updated_at = datetime.utcnow()
+                    state_logger.info(
+                        f"COLLECTING→ANALYZING(auto) | {meeting_id} | {meeting.title} | "
+                        f"所有人已完成，自动重新进入分析"
+                    )
+
             except ValueError:
                 # 超过最大轮数 → FAILED
                 logs = db.query(NegotiationLog).filter(

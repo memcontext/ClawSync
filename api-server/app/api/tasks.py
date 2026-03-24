@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
+from datetime import datetime
 from ..models.database import User, Meeting, NegotiationLog
 from ..models.schemas import APIResponse
 from ..utils.deps import get_db, get_current_user
@@ -92,6 +93,15 @@ async def get_pending_tasks(
                 "duration_minutes": meeting.duration_minutes,
                 "round_count": meeting.round_count
             })
+
+            # 通知型任务（CONFIRMED/FAILED/OVER）：读即消费，防止重复推送
+            if task_type in ("MEETING_CONFIRMED", "MEETING_FAILED", "MEETING_OVER"):
+                log.action_required = False
+                log.updated_at = datetime.utcnow()
+
+        # 统一提交通知消费的状态变更
+        if pending_tasks:
+            db.commit()
 
         return APIResponse(
             code=200,
