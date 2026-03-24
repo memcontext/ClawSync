@@ -127,25 +127,48 @@ export default function register(api: any) {
 
   // ============================================================
   // 5. 主动推送消息到 session
-  // 方案：pendingNotifications 内存队列 + requestHeartbeatNow 触发 heartbeat
-  //       → before_prompt_build 钩子 drain 队列 → 注入 prependContext
+  // 方案：pendingNotifications 内存队列 + cron wake event 触发 agent turn
   //
   // 工作流程：
-  //   1. 通知文本放入 pendingNotifications 数组
-  //   2. requestHeartbeatNow() → 立即触发一次 heartbeat agent turn
+  //   1. 通知文本放入 pendingNotifications 数组（插件内存）
+  //   2. cron wake event → 在 main session 触发一个正常 agent turn
   //   3. before_prompt_build 被调用 → drain pendingNotifications → 注入 prependContext
   //   4. Agent 在 system prompt 里看到通知 → 自然语言回复用户
+  //   5. 正常 agent turn → 回复通过常规 channel delivery 投递
   //
-  // 优点：
-  //   - 不走 agent-to-agent 流程 → 无 announce step → 零泄露
-  //   - 不用 enqueueSystemEvent → webchat 不会显示 "System:" 行
-  //   - 用户只看到 Agent 的自然语言回复，体验干净
+  // 为什么不用 heartbeat：
+  //   heartbeat.target 默认 "none"，回复不投递到 channel
+  // 为什么不用 enqueueSystemEvent：
+  //   webchat 会显示 "System:" 气泡，用户体验差
+  // 为什么不用 sessions_send：
+  //   走 agent-to-agent 流程，有 announce step 泄露风险
   // ============================================================
-  function pushMessageToSession(message: string): boolean {
+  const gatewayPort = api.config?.gateway?.port ?? 18789;
+  const gatewayToken = api.config?.gateway?.auth?.token
+    ?? process.env.OPENCLAW_GATEWAY_TOKEN
+    ?? null;
+
+  async function pushMessageToSession(message: string): Promise<boolean> {
     try {
       pendingNotifications.push(message);
-      api.runtime.system.requestHeartbeatNow();
-      console.log(`[ClawMeeting] 通知已入队 + 触发 heartbeat (${pendingNotifications.length} pending)`);
+
+      // 通过 cron wake event 触发 main session 的 agent turn
+      if (gatewayToken) {
+        const wakeText = "[ClawMeeting] New notifications pending. Check and relay to user.";
+        await fetch(`http://127.0.0.1:${gatewayPort}/cron/wake`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${gatewayToken}`,
+          },
+          body: JSON.stringify({ text: wakeText, mode: "now" }),
+        });
+        console.log(`[ClawMeeting] 通知已入队 + wake event sent (${pendingNotifications.length} pending)`);
+      } else {
+        // 没有 gateway token 时 fallback 到 heartbeat（可能不投递，但总比没有好）
+        api.runtime.system.requestHeartbeatNow();
+        console.log(`[ClawMeeting] 通知已入队 + heartbeat fallback (${pendingNotifications.length} pending)`);
+      }
       return true;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -352,7 +375,7 @@ export default function register(api: any) {
     // ==== 批量推送：所有通知合并为一条 system event ====
     if (notifications.length > 0) {
       const batchMessage = `[ClawMeeting Notifications]\n\n${notifications.join("\n\n---\n\n")}`;
-      const pushed = pushMessageToSession(batchMessage);
+      const pushed = await pushMessageToSession(batchMessage);
       if (!pushed) {
         // fallback: 放入 pendingNotifications，等用户下次交互时展示
         userMessages.push(...notifications);
