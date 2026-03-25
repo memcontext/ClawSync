@@ -62,19 +62,9 @@ def send_meeting_confirmed_email(
                 "Content-Type": "application/json",
             },
             json={
-                "transactionalId": LOOPS_MEETING_CONFIRMED_ID or LOOPS_TRANSACTIONAL_ID,
+                "transactionalId": LOOPS_MEETING_CONFIRMED_ID,
                 "email": to_email,
                 "dataVariables": {
-                    # 临时方案：复用验证码模板的 code 字段传递会议信息
-                    # 等专用模板创建后替换为独立变量
-                    "code": (
-                        f"会议已确认！\n"
-                        f"会议：{meeting_title}\n"
-                        f"时间：{final_time}\n"
-                        f"时长：{duration_minutes} 分钟\n"
-                        f"发起人：{initiator_email}\n"
-                        f"会议链接：{meeting_link or '待定'}"
-                    ),
                     "meetingTitle": meeting_title,
                     "finalTime": final_time,
                     "durationMinutes": str(duration_minutes),
