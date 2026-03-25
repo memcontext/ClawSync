@@ -1,4 +1,4 @@
-"""Google Meet 会议链接生成器 — 基于 Google Calendar API"""
+"""Google Meet 会议链接生成器 — 运行即生成一个真实可入会的链接"""
 
 import os
 import uuid
@@ -13,10 +13,7 @@ from config import SCOPES, CLIENT_SECRET_FILE, TOKEN_FILE
 
 
 def get_calendar_service():
-    """获取已授权的 Google Calendar 服务实例。
-
-    首次运行会弹出浏览器进行 OAuth 授权，之后自动复用 token。
-    """
+    """获取已授权的 Google Calendar 服务实例。"""
     creds = None
 
     if os.path.exists(TOKEN_FILE):
@@ -40,24 +37,13 @@ def get_calendar_service():
 
 
 def create_meeting(
-    summary: str = "在线会议",
-    description: str = "",
-    start_time: datetime | None = None,
-    duration_minutes: int = 60,
-    attendees: list[str] | None = None,
-) -> dict:
-    """创建带有 Google Meet 链接的日历事件。
-
-    Args:
-        summary: 会议标题
-        description: 会议描述
-        start_time: 开始时间（默认为当前时间 + 5 分钟）
-        duration_minutes: 会议时长（分钟）
-        attendees: 参会者邮箱列表
-
-    Returns:
-        包含会议信息的字典
-    """
+    summary="在线会议",
+    description="",
+    start_time=None,
+    duration_minutes=60,
+    attendees=None,
+):
+    """创建带有 Google Meet 链接的日历事件并返回信息。"""
     service = get_calendar_service()
 
     if start_time is None:
@@ -76,7 +62,6 @@ def create_meeting(
             "dateTime": end_time.isoformat(),
             "timeZone": "Asia/Shanghai",
         },
-        # 关键：请求自动创建 Google Meet 会议
         "conferenceData": {
             "createRequest": {
                 "requestId": uuid.uuid4().hex,
@@ -91,7 +76,7 @@ def create_meeting(
     event = service.events().insert(
         calendarId="primary",
         body=event_body,
-        conferenceDataVersion=1,  # 必须设为 1 才会生成 Meet 链接
+        conferenceDataVersion=1,
     ).execute()
 
     conference = event.get("conferenceData", {})
@@ -105,3 +90,16 @@ def create_meeting(
         "end_time": event["end"]["dateTime"],
         "html_link": event["htmlLink"],
     }
+
+
+if __name__ == "__main__":
+    print("正在创建 Google Meet 会议...")
+    result = create_meeting(
+        summary="测试会议",
+        duration_minutes=30,
+    )
+    print(f"\n会议标题: {result['summary']}")
+    print(f"Meet 链接: {result['meet_link']}")
+    print(f"开始时间: {result['start_time']}")
+    print(f"结束时间: {result['end_time']}")
+    print(f"日历链接: {result['html_link']}")
