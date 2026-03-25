@@ -305,8 +305,7 @@ export default function register(api: any) {
         } catch (_e) { /* ignore */ }
 
         agentNotifications.push(notifyLines.join("\n"));
-        // INITIAL_SUBMIT 不推渠道
-        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 通知 Agent 处理`);
+        console.log(`[ClawMeeting] 收集 INITIAL_SUBMIT: 「${title}」(${meetingId}) 消息: ${(t.message ?? "").substring(0, 80)}`);
         continue;
       }
 
@@ -317,7 +316,7 @@ export default function register(api: any) {
         savePendingDecisions([...pendingDecisions]);
 
         agentNotifications.push(buildAgentNotification(t));
-        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 第${t.round_count ?? 0}轮协商，通知用户`);
+        console.log(`[ClawMeeting] 收集 COUNTER_PROPOSAL: 「${title}」(${meetingId}) round=${t.round_count ?? 0} 消息: ${(t.message ?? "").substring(0, 80)}`);
         continue;
       }
 
@@ -328,7 +327,7 @@ export default function register(api: any) {
         savePendingDecisions([...pendingDecisions]);
 
         agentNotifications.push(buildAgentNotification(t));
-        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 协商失败，通知用户`);
+        console.log(`[ClawMeeting] 收集 MEETING_FAILED: 「${title}」(${meetingId}) 消息: ${(t.message ?? "").substring(0, 80)}`);
         continue;
       }
 
@@ -337,7 +336,7 @@ export default function register(api: any) {
       notifiedMeetings.add(meetingId);
 
       agentNotifications.push(buildAgentNotification(t));
-      console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 通知 type=${taskType}`);
+      console.log(`[ClawMeeting] 收集 ${taskType}: 「${title}」(${meetingId}) 消息: ${(t.message ?? "").substring(0, 80)}`);
     }
 
     // ==== 先持久化，再推送（确保不会因重启丢失去重状态）====
@@ -358,8 +357,10 @@ export default function register(api: any) {
     if (agentNotifications.length === 0) return userMessages;
 
     const batchMsg = agentNotifications.join("\n\n---\n\n");
-    const sessionCount = 1 + (telegramCtx ? 1 : 0);
-    console.log(`[ClawMeeting] 推送 ${agentNotifications.length} 条通知到 ${sessionCount} 个 session`);
+    const targets = [`主session(${sessionCtx.sessionKey})`];
+    if (telegramCtx) targets.push(`Telegram(${telegramCtx.sessionKey})`);
+    console.log(`[ClawMeeting] 推送 ${agentNotifications.length} 条通知 → ${targets.join(" + ")}`);
+    console.log(`[ClawMeeting] 推送内容摘要: ${batchMsg.substring(0, 150).replace(/\n/g, " ")}...`);
 
     // ---- 主 session ----
     const { ok: mainOk } = await sendViaSessionsSend(batchMsg);
