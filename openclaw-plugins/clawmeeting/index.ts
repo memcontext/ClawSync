@@ -395,9 +395,7 @@ export default function register(api: any) {
       `Meeting #: ${meetingNumber}`,
     ];
 
-    // 确认的会议：尝试获取最终时间
     if (taskType === "MEETING_CONFIRMED") {
-      // 异步拉详情不现实（这是同步函数），用 t 上可能有的字段
       if (t.final_time) {
         lines.push(`Time: ${t.final_time}`);
       }
@@ -526,17 +524,15 @@ export default function register(api: any) {
       if (notifiedMeetings.has(meetingId)) continue;
       notifiedMeetings.add(meetingId);
 
-      // CONFIRMED：拉详情补充最终时间和会议链接（任务字段已含 meeting_link，详情作兜底）
+      // CONFIRMED：pending_tasks 已含 meeting_link/duration_minutes，仅拉详情补 final_time
       if (taskType === "MEETING_CONFIRMED") {
-        console.log(`[ClawMeeting] CONFIRMED 任务字段: final_time=${t.final_time ?? "null"}, meeting_link=${t.meeting_link ?? "null"}`);
+        console.log(`[ClawMeeting] CONFIRMED 任务字段: meeting_link=${t.meeting_link ?? "null"}, duration=${t.duration_minutes ?? "null"}`);
         try {
           const detail = await apiClient.getMeetingDetail(meetingId);
-          console.log(`[ClawMeeting] CONFIRMED 详情接口: final_time=${detail.final_time ?? "null"}, meeting_link=${(detail as any).meeting_link ?? "null"}, status=${(detail as any).status ?? "null"}`);
           t.final_time = t.final_time ?? detail.final_time ?? null;
-          t.duration_minutes = t.duration_minutes ?? (detail as any).duration_minutes ?? null;
-          t.meeting_link = t.meeting_link ?? (detail as any).meeting_link ?? null;
-        } catch (detailErr) {
-          console.error(`[ClawMeeting] CONFIRMED 拉详情失败 (${meetingId}):`, detailErr);
+          console.log(`[ClawMeeting] CONFIRMED 详情补充: final_time=${t.final_time ?? "null"}`);
+        } catch (_e) {
+          // final_time 缺失不影响通知
         }
       }
 
