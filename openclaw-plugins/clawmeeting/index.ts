@@ -57,7 +57,7 @@ import type { ClawMeetingPluginConfig, SessionContext, TaskType } from "./src/ty
 
 // ---- 默认配置 ----
 const DEFAULT_CONFIG: ClawMeetingPluginConfig = {
-  serverUrl: "http://192.168.22.28:8000",
+  serverUrl: "http://39.105.143.2:7010",
   pollingIntervalMs: 10000,
   autoRespond: true,
 };

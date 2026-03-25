@@ -209,7 +209,7 @@ COLLECTING → ANALYZING → CONFIRMED
 
 ## 开发环境配置
 
-- **测试服务端地址**: `http://192.168.22.28:8000`（开发阶段）
+- **测试服务端地址**: `http://39.105.143.2:7010`（开发阶段）
 - **符号链接**: `C:\Users\jushi\.openclaw\extensions\clawmeeting` → `D:\lll\pl\openclaw-plugins\clawmeeting`
 - **开发工作流**: 改代码 → 重启网关 → 直接测试（无需手动迁移）
 - **openclaw.json 配置**: 已加 `plugins.allow: ["clawmeeting"]` 和 `plugins.load.paths`
