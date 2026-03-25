@@ -12,8 +12,9 @@
 //   4. 主动推送：通过 gateway HTTP API 的 sessions_send 触发 agent 回合
 // ============================================================
 
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 import { ClawMeetingApiClient } from "./src/utils/api-client.js";
 import {
   initStorage,
@@ -24,6 +25,8 @@ import {
   saveNotifiedMeetings,
   loadPendingDecisions,
   savePendingDecisions,
+  loadAllChannelCtx,
+  saveChannelCtx,
 } from "./src/utils/storage.js";
 import { PollingManager } from "./src/utils/polling-manager.js";
 
@@ -123,7 +126,45 @@ export default function register(api: any) {
     console.log(`[ClawMeeting] session: ${sessionCtx.sessionKey}`);
   }
 
-  // Telegram 叠加推送已移除 — getDirectMessageChannel 从 sessionKey 自动解析 channel 和 target
+  // ============================================================
+  // 3b. 多渠道叠加推送：自动发现所有活跃的非主 session 渠道
+  // 优先级：已捕获的 session > 从 pairing allow store 自动发现
+  // ============================================================
+  const extraChannels: Map<string, SessionContext> = loadAllChannelCtx();
+  if (extraChannels.size > 0) {
+    console.log(`[ClawMeeting] 已恢复 ${extraChannels.size} 个渠道: ${[...extraChannels.keys()].join(", ")}`);
+  }
+
+  // 自动发现：遍历 api.config.channels，找 enabled 的渠道，读 pairing allow store
+  // 排除 webchat（主 session 已覆盖）
+  const WEBCHAT_CHANNELS = new Set(["webchat", "web", "main"]);
+  const channelsConfig = api.config?.channels ?? {};
+  for (const [channelName, channelCfg] of Object.entries(channelsConfig)) {
+    if (WEBCHAT_CHANNELS.has(channelName)) continue;
+    if (!(channelCfg as any)?.enabled) continue;
+    if (extraChannels.has(channelName)) continue; // 已有捕获的 session，跳过
+
+    // 尝试读取 pairing allow store: ~/.openclaw/credentials/{channel}-default-allowFrom.json
+    try {
+      const allowStorePath = join(homedir(), ".openclaw", "credentials", `${channelName}-default-allowFrom.json`);
+      if (existsSync(allowStorePath)) {
+        const storeData = JSON.parse(readFileSync(allowStorePath, "utf-8"));
+        const allowFrom: string[] = storeData?.allowFrom ?? [];
+        if (allowFrom.length > 0) {
+          const targetId = allowFrom[0];
+          const ctx: SessionContext = {
+            sessionKey: `agent:main:${channelName}:direct:${targetId}`,
+            channel: channelName,
+          };
+          extraChannels.set(channelName, ctx);
+          saveChannelCtx(channelName, ctx);
+          console.log(`[ClawMeeting] 自动发现 ${channelName} 目标: ${targetId} (from pairing allow store)`);
+        }
+      }
+    } catch (err) {
+      console.log(`[ClawMeeting] 读取 ${channelName} allow store 失败: ${err}`);
+    }
+  }
 
   // ============================================================
   // 4. Gateway 认证 Token（用于主动推送消息）
@@ -149,97 +190,57 @@ export default function register(api: any) {
   // webchat 不支持 message tool → fallback 到 sessions_send
   // ============================================================
 
-  /**
-   * 从 sessionKey 解析 channel 和 target（同 OpenClaw 内部 resolveAnnounceTargetFromKey 逻辑）
-   * sessionKey 格式: "agent:<agentId>:<channel>:<kind>:<id>" 或 "<channel>:<kind>:<id>"
-   * 例: "agent:main:telegram:group:12345" → { channel: "telegram", target: "12345" }
-   * webchat 不支持 message tool，返回 null
-   */
-  function getDirectMessageChannel(): { channel: string; target: string } | null {
-    const sk = sessionCtx.sessionKey;
-    if (!sk) return null;
+  // getDirectMessageChannel 已由 parseChannelFromSessionKey 替代
 
+  /**
+   * 解析任意 sessionKey 的 channel + target（用于 message tool 直发）
+   */
+  function parseChannelFromSessionKey(sk: string | undefined): { channel: string; target: string } | null {
+    if (!sk) return null;
     const rawParts = sk.split(":").filter(Boolean);
-    // 去掉 "agent:<agentId>" 前缀
     const parts = rawParts.length >= 3 && rawParts[0] === "agent" ? rawParts.slice(2) : rawParts;
     if (parts.length < 3) return null;
-
     const [channelRaw, kind, ...rest] = parts;
     if (!channelRaw || channelRaw === "webchat" || channelRaw === "main") return null;
-    if (kind !== "group" && kind !== "channel") return null;
-
-    // 去掉 :topic:N 或 :thread:N 后缀
+    if (kind !== "group" && kind !== "channel" && kind !== "dm" && kind !== "direct") return null;
     const restJoined = rest.join(":");
     const id = restJoined.replace(/:(topic|thread):\d+$/, "").trim();
     if (!id) return null;
-
     return { channel: channelRaw, target: id };
   }
 
   /**
-   * 推送纯通知（CONFIRMED/OVER/FAILED 等）
-   * 优先用 message tool 直接发（不经过 LLM，零泄露）
-   * 不支持时 fallback 到 sessions_send
-   * 无论成功与否，都放入 pendingNotifications 兜底
+   * 通过 message tool 直接发消息到指定 channel（不经过 LLM）
    */
-  /**
-   * 推送纯通知（CONFIRMED/OVER/FAILED 等）
-   * 优先用 message tool 直接发（不经过 LLM，零泄露）
-   * 不支持时 fallback 到 sessions_send
-   * 失败时放入 pendingNotifications 兜底
-   */
-  async function pushNotification(message: string): Promise<boolean> {
-    if (!gatewayToken) return false;
-
-    // 尝试 message tool 直接发
-    const direct = getDirectMessageChannel();
-    if (direct) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${gatewayToken}`,
-          },
-          body: JSON.stringify({
-            tool: "message",
-            args: {
-              action: "send",
-              channel: direct.channel,
-              target: direct.target,
-              message,
-            },
-          }),
-        });
-        if (res.ok) {
-          console.log(`[ClawMeeting] 通知直接发送成功 (${direct.channel})`);
-          return true;
-        }
-        console.log(`[ClawMeeting] message tool 失败，fallback 到 sessions_send`);
-      } catch {
-        // fallback
+  async function sendViaMessageTool(channel: string, target: string, message: string): Promise<boolean> {
+    try {
+      const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${gatewayToken}`,
+        },
+        body: JSON.stringify({
+          tool: "message",
+          args: { action: "send", channel, target, message },
+        }),
+      });
+      if (res.ok) {
+        console.log(`[ClawMeeting] message tool 发送成功 (${channel}:${target})`);
+        return true;
       }
+      console.log(`[ClawMeeting] message tool 失败 (${channel}): ${res.status}`);
+      return false;
+    } catch (err) {
+      console.log(`[ClawMeeting] message tool 异常 (${channel}): ${err}`);
+      return false;
     }
-
-    // fallback: sessions_send
-    return sendViaSessionsSend(message);
   }
 
   /**
-   * 推送需要 Agent 处理的消息（INITIAL_SUBMIT 等）
-   * 走 sessions_send 触发 agent turn（用户不可见）
+   * 通过 sessions_send 发送到指定 session，带超时
    */
-  async function pushAgentMessage(message: string): Promise<boolean> {
-    if (!gatewayToken) return false;
-    return sendViaSessionsSend(message);
-  }
-
-  /**
-   * 通过 sessions_send 发送，带超时
-   * 成功 → 直接送达，不动 pendingNotifications
-   * 失败/超时 → 放入 pendingNotifications 兜底
-   */
-  async function sendViaSessionsSend(message: string): Promise<boolean> {
+  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<boolean> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
 
@@ -253,9 +254,11 @@ export default function register(api: any) {
         body: JSON.stringify({
           tool: "sessions_send",
           args: {
-            sessionKey: sessionCtx.sessionKey ?? "agent:main:main",
+            sessionKey: sessionKey ?? sessionCtx.sessionKey ?? "agent:main:main",
+            role: "system",
             message,
             delivery: { mode: "none" },
+            announce: false,
           },
         }),
         signal: controller.signal,
@@ -264,7 +267,7 @@ export default function register(api: any) {
       clearTimeout(timeout);
 
       if (res.ok) {
-        console.log("[ClawMeeting] 推送成功 (sessions_send)");
+        console.log(`[ClawMeeting] 推送成功 (sessions_send → ${sessionKey ?? sessionCtx.sessionKey})`);
         return true;
       } else {
         const body = await res.text();
@@ -277,6 +280,72 @@ export default function register(api: any) {
       console.log(`[ClawMeeting] sessions_send 未完成 (${errMsg})，将由 pendingNotifications 兜底`);
       return false;
     }
+  }
+
+  /**
+   * 叠加推送到所有已发现的额外渠道（Telegram / Discord / Feishu 等）
+   * 跳过与主 session 相同的渠道（避免重复）
+   */
+  async function pushToExtraChannels(message: string): Promise<void> {
+    if (extraChannels.size === 0) {
+      console.log("[ClawMeeting] 无额外渠道，跳过叠加推送");
+      return;
+    }
+    const mainChannel = parseChannelFromSessionKey(sessionCtx.sessionKey);
+    console.log(`[ClawMeeting] 叠加推送到 ${extraChannels.size} 个额外渠道: ${[...extraChannels.keys()].join(", ")} (主渠道: ${mainChannel?.channel ?? "none"})`);
+    for (const [channelName, ctx] of extraChannels) {
+      if (mainChannel && mainChannel.channel === channelName) {
+        console.log(`[ClawMeeting] 跳过 ${channelName}（与主渠道相同）`);
+        continue;
+      }
+      const parsed = parseChannelFromSessionKey(ctx.sessionKey);
+      if (!parsed) {
+        console.log(`[ClawMeeting] 跳过 ${channelName}（sessionKey 解析失败: ${ctx.sessionKey}）`);
+        continue;
+      }
+      await sendViaMessageTool(parsed.channel, parsed.target, message);
+    }
+  }
+
+  /**
+   * 推送纯通知（CONFIRMED/OVER/FAILED 等）
+   * 策略：主 session (sessions_send) + 所有额外渠道叠加 (message tool)
+   */
+  async function pushNotification(message: string): Promise<boolean> {
+    if (!gatewayToken) {
+      console.log("[ClawMeeting] pushNotification 跳过: 无 gateway token");
+      return false;
+    }
+
+    console.log(`[ClawMeeting] pushNotification 开始: 主session=${sessionCtx.sessionKey}, extraChannels=${extraChannels.size}`);
+
+    // 1. 额外渠道立即并行推送（不等主 session，避免 sessions_send 阻塞导致 Telegram 漏发）
+    const extraPromise = pushToExtraChannels(message);
+
+    // 2. 主 session: 尝试 message tool 直发，不行则 sessions_send
+    const direct = parseChannelFromSessionKey(sessionCtx.sessionKey);
+    let mainOk = false;
+    if (direct) {
+      console.log(`[ClawMeeting] 主 session 直发: ${direct.channel}:${direct.target}`);
+      mainOk = await sendViaMessageTool(direct.channel, direct.target, message);
+    }
+    if (!mainOk) {
+      console.log("[ClawMeeting] 主 session fallback to sessions_send");
+      mainOk = await sendViaSessionsSend(message);
+    }
+
+    await extraPromise;
+    console.log(`[ClawMeeting] pushNotification 完成: mainOk=${mainOk}`);
+    return mainOk;
+  }
+
+  /**
+   * 推送需要 Agent 静默处理的消息（INITIAL_SUBMIT 等）
+   * 仅走 sessions_send 触发 agent turn，不推送给用户
+   */
+  async function pushAgentMessage(message: string): Promise<boolean> {
+    if (!gatewayToken) return false;
+    return sendViaSessionsSend(message);
   }
 
 
@@ -334,6 +403,9 @@ export default function register(api: any) {
       }
       if (t.duration_minutes) {
         lines.push(`Duration: ${t.duration_minutes} minutes`);
+      }
+      if (t.meeting_link) {
+        lines.push(`Meeting link: ${t.meeting_link}`);
       }
     }
 
@@ -454,14 +526,17 @@ export default function register(api: any) {
       if (notifiedMeetings.has(meetingId)) continue;
       notifiedMeetings.add(meetingId);
 
-      // CONFIRMED：拉详情补充最终时间和参与者信息
+      // CONFIRMED：拉详情补充最终时间和会议链接（任务字段已含 meeting_link，详情作兜底）
       if (taskType === "MEETING_CONFIRMED") {
+        console.log(`[ClawMeeting] CONFIRMED 任务字段: final_time=${t.final_time ?? "null"}, meeting_link=${t.meeting_link ?? "null"}`);
         try {
           const detail = await apiClient.getMeetingDetail(meetingId);
-          t.final_time = detail.final_time ?? null;
+          console.log(`[ClawMeeting] CONFIRMED 详情接口: final_time=${detail.final_time ?? "null"}, meeting_link=${(detail as any).meeting_link ?? "null"}, status=${(detail as any).status ?? "null"}`);
+          t.final_time = t.final_time ?? detail.final_time ?? null;
           t.duration_minutes = t.duration_minutes ?? (detail as any).duration_minutes ?? null;
-        } catch (_e) {
-          // 拉详情失败不影响通知，继续用已有信息
+          t.meeting_link = t.meeting_link ?? (detail as any).meeting_link ?? null;
+        } catch (detailErr) {
+          console.error(`[ClawMeeting] CONFIRMED 拉详情失败 (${meetingId}):`, detailErr);
         }
       }
 
@@ -482,35 +557,67 @@ export default function register(api: any) {
     }
 
     // ==== 分流推送 ====
-    // INITIAL_SUBMIT       → sessions_send 触发 agent turn（静默处理，用户不可见）
-    // COUNTER_PROPOSAL     → message tool 直接发给用户 + prependContext 让 Agent 下次处理
-    // MEETING_FAILED       → message tool 直接发给用户 + prependContext 让 Agent 下次处理
-    // CONFIRMED/OVER 等    → message tool 直接发给用户（纯通知）
-    const silentAgentTasks: string[] = [];     // INITIAL_SUBMIT → sessions_send（用户不可见）
-    const userVisibleMessages: string[] = [];  // 其他所有 → message tool（用户可见）
+    // 1. 所有通知都推 Telegram（通过 message tool 直发）
+    // 2. INITIAL_SUBMIT 额外走 sessions_send 触发 agent turn
+    // 3. 其它通知走 pushNotification（主 session + Telegram）
+    const silentAgentTasks: string[] = [];     // INITIAL_SUBMIT → sessions_send
+    const silentMeetingIds: string[] = [];     // 对应 meeting_id，失败时回滚
+    const userVisibleMessages: string[] = [];  // 其他所有 → pushNotification
 
     for (const n of notifications) {
       if (n.includes("[ClawMeeting Meeting Invitation]")) {
         silentAgentTasks.push(n);
+        // 提取 meeting_id
+        const idMatch = n.match(/Meeting ID: (mtg_\w+)/);
+        if (idMatch) silentMeetingIds.push(idMatch[1]);
       } else {
         userVisibleMessages.push(n);
       }
     }
 
-    // 静默任务：sessions_send 触发 agent turn（用户不可见）
+    // 诊断日志
+    console.log(`[ClawMeeting] 推送分流: silent=${silentAgentTasks.length}, user=${userVisibleMessages.length}, extraChannels=${extraChannels.size}`);
+    for (const [ch, ctx] of extraChannels) {
+      console.log(`[ClawMeeting]   渠道 ${ch}: ${ctx.sessionKey}`);
+    }
+
+    // ---- 所有通知立即推 Telegram（不等主 session）----
+    if (notifications.length > 0) {
+      const allMsg = notifications.join("\n\n---\n\n");
+      pushToExtraChannels(allMsg).catch(err =>
+        console.log(`[ClawMeeting] Telegram 推送异常: ${err}`),
+      );
+    }
+
+    // ---- INITIAL_SUBMIT：sessions_send 触发 agent turn ----
     if (silentAgentTasks.length > 0) {
       const batchMsg = `[ClawMeeting Notifications]\n\n${silentAgentTasks.join("\n\n---\n\n")}`;
       const pushed = await pushAgentMessage(batchMsg);
       if (!pushed) {
-        userMessages.push(...silentAgentTasks);
+        // agent 失败 → 回滚 submittedMeetings，让下次轮询重试
+        // 安全：如果 agent 实际已处理，服务端不再返回 INITIAL_SUBMIT，下次轮询自然跳过
+        for (const mid of silentMeetingIds) {
+          submittedMeetings.delete(mid);
+        }
+        console.log(`[ClawMeeting] 静默任务推送失败，已回滚 ${silentMeetingIds.length} 个 submittedMeetings，下次轮询将重试`);
       }
     }
 
-    // 用户可见消息：message tool 直接发给 channel（不以用户身份注入）
+    // ---- 用户可见消息：推送到主 session ----
     if (userVisibleMessages.length > 0) {
+      console.log(`[ClawMeeting] 准备推送 ${userVisibleMessages.length} 条用户可见消息到主 session`);
       const batchMsg = userVisibleMessages.join("\n\n---\n\n");
-      const pushed = await pushNotification(batchMsg);
-      if (!pushed) {
+      // 主 session: 尝试 message tool 直发，不行则 sessions_send
+      const direct = parseChannelFromSessionKey(sessionCtx.sessionKey);
+      let mainOk = false;
+      if (direct) {
+        mainOk = await sendViaMessageTool(direct.channel, direct.target, batchMsg);
+      }
+      if (!mainOk) {
+        mainOk = await sendViaSessionsSend(batchMsg);
+      }
+      if (!mainOk) {
+        console.log("[ClawMeeting] 主 session 推送失败，消息放入 pendingNotifications 兜底");
         userMessages.push(...userVisibleMessages);
       }
     }
@@ -528,29 +635,42 @@ export default function register(api: any) {
     onPoll: async () => {
       const result = await taskHandler({});
       const taskResults = (result as any).task_results ?? [];
+      // 诊断：列出 API 返回的所有任务（含类型和 meeting_id）
+      if (taskResults.length > 0) {
+        console.log(`[ClawMeeting] API 返回 ${taskResults.length} 个任务: ${taskResults.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
+      }
       const newTasks = taskResults.filter((t: any) => {
         const tt = t.task_type;
+        const mid = t.meeting_id;
         // CONFIRMED/OVER：纯通知去重
         if (tt === "MEETING_CONFIRMED" || tt === "MEETING_OVER") {
-          return !notifiedMeetings.has(t.meeting_id);
+          const dup = notifiedMeetings.has(mid);
+          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 notifiedMeetings`);
+          return !dup;
         }
         // FAILED：需要发起人决策，用 pendingDecisions 去重
         if (tt === "MEETING_FAILED") {
-          return !pendingDecisions.has(t.meeting_id);
+          const dup = pendingDecisions.has(mid);
+          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 pendingDecisions`);
+          return !dup;
         }
         // INITIAL_SUBMIT：已提交过的不再重试
         if (tt === "INITIAL_SUBMIT") {
-          return !submittedMeetings.has(t.meeting_id);
+          const dup = submittedMeetings.has(mid);
+          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 submittedMeetings`);
+          return !dup;
         }
         // COUNTER_PROPOSAL：等待用户决策的不再重复通知
         if (tt === "COUNTER_PROPOSAL") {
-          return !pendingDecisions.has(t.meeting_id);
+          const dup = pendingDecisions.has(mid);
+          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 pendingDecisions`);
+          return !dup;
         }
         // 其它未知类型：用 notifiedMeetings 去重，防止重复推送
-        return !notifiedMeetings.has(t.meeting_id);
+        return !notifiedMeetings.has(mid);
       });
       if (newTasks.length > 0) {
-        console.log(`[ClawMeeting] 轮询发现 ${newTasks.length} 个新待办任务`);
+        console.log(`[ClawMeeting] 轮询发现 ${newTasks.length} 个新待办任务: ${newTasks.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
       }
       return { ...(result as any), task_results: newTasks, pending_count: newTasks.length };
     },
@@ -730,6 +850,18 @@ export default function register(api: any) {
           sessionCtx = { sessionKey, channel };
           saveSession(sessionCtx);
           console.log(`[ClawMeeting] session updated: ${sessionKey} channel=${channel}`);
+        }
+
+        // 额外渠道 session 自动捕获（叠加推送用）
+        // 非 webchat/main 的渠道都记录下来
+        if (channel && !WEBCHAT_CHANNELS.has(channel)) {
+          const existing = extraChannels.get(channel);
+          if (!existing || existing.sessionKey !== sessionKey) {
+            const ctx: SessionContext = { sessionKey, channel };
+            extraChannels.set(channel, ctx);
+            saveChannelCtx(channel, ctx);
+            console.log(`[ClawMeeting] ${channel} session captured: ${sessionKey}`);
+          }
         }
       }
 

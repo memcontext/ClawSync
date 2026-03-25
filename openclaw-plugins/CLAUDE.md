@@ -31,7 +31,8 @@ openclaw-plugins/
     │   └── clawmeeting-guide/SKILL.md
     └── src/
         ├── tools/
-        │   ├── bind-identity.ts        # 邮箱绑定
+        │   ├── bind-identity.ts        # 邮箱绑定 Step1（发送验证码）
+        │   ├── verify-email-code.ts    # 邮箱绑定 Step2（校验验证码完成绑定）
         │   ├── initiate-meeting.ts     # 发起会议
         │   ├── check-and-respond-tasks.ts  # 查询任务 + 提交响应
         │   └── list-meetings.ts        # 查看会议列表/详情
@@ -45,9 +46,32 @@ openclaw-plugins/
 
 ## 当前阶段
 
-**MVP 阶段** — 核心协商流程已通，正在修 bug 和完善通知投递机制。mock-calendar 仍为模拟数据，未接入真实日历。
+**MVP 阶段** — 核心协商流程已通，邮箱验证码绑定已完成，正在解决通知投递 UX 问题。mock-calendar 仍为模拟数据，未接入真实日历。
 
-## 关键约束（必须遵守）
+## 编程原则（必须遵守）
+
+### 通用化优先
+
+实现功能时必须优先考虑通用方案，而非为特定场景硬编码：
+
+- **数据结构通用化**：用 `Map<string, T>` / 配置驱动代替硬编码。例如渠道推送不要写 `telegramCtx`，要写 `extraChannels: Map<string, SessionContext>` 支持所有渠道。
+- **自动发现优先**：能从配置/环境自动检测的就不要让用户手动操作。例如从 `api.config.channels` 遍历已启用渠道 + 读取 pairing allow store 自动发现推送目标，而非要求用户先发消息触发捕获。
+- **渐进增强**：基础功能（主 session 推送）永远可用，增强功能（额外渠道推送）按条件叠加 — 有就推、没有就跳过，不影响主流程。
+- **新增渠道零改动**：如果用户将来配了 Discord/Feishu，插件应自动发现并推送，不需要改代码。
+
+### 推送分流原则
+
+不同类型的通知有不同的投递策略，不要一刀切：
+
+| 类型 | 是否推送给用户 | 原因 |
+|------|--------------|------|
+| INITIAL_SUBMIT | ❌ 静默 Agent 处理 | 用户不需要知道，Agent 自动查日历提交 |
+| COUNTER_PROPOSAL | ✅ 推送 | 需要用户决策 |
+| MEETING_FAILED | ✅ 推送 | 需要用户决策（取消/重试） |
+| MEETING_CONFIRMED | ✅ 推送 | 告知用户结果 |
+| MEETING_OVER | ✅ 推送 | 告知用户结果 |
+
+### 框架交互约束
 
 **本插件基于 OpenClaw 的插件适配方式开发，所有与框架交互的代码必须严格使用 OpenClaw SDK 已有的 API。禁止编造不存在的字段、方法或实现方式。**
 
@@ -105,7 +129,7 @@ api.registerCli?.((cliCtx: { program: any }) => {
 #### Gateway HTTP API（通过 fetch 调用，非 SDK 方法）
 - `POST http://127.0.0.1:{port}/tools/invoke` — 调用 Gateway 工具
   - `tool: "message"` + `args: { action, channel, target, message }` — 直接发消息到渠道
-  - `tool: "sessions_send"` + `args: { sessionKey, message, delivery: { mode } }` — 触发 Agent 回合
+  - `tool: "sessions_send"` + `args: { sessionKey, role, message, delivery: { mode }, announce }` — 触发 Agent 回合（role: "system" 避免用户气泡，announce: false 防止广播）
 
 **以上是代码中实际使用的全部 API。如果需要新功能，先查阅 OpenClaw 文档确认 API 存在，不要假设或猜测。**
 
@@ -131,15 +155,29 @@ api.registerCli?.((cliCtx: { program: any }) => {
 2. **submittedMeetings**（内存）— 已提交 INITIAL_SUBMIT 的会议，防止轮询重复推送
 3. **pendingDecisions**（磁盘持久化）— 等待用户决策的会议（COUNTER_PROPOSAL/FAILED），决策前不重复通知
 
-### 通知投递（双通道 + 兜底）
-- **message tool**（直接发）— Telegram/Discord/Feishu 等正式渠道，不经过 LLM
-- **sessions_send**（触发 Agent）— webchat 或 fallback，触发 Agent 回合处理
+### 通知投递（分流策略）
+当前实现采用分流推送：
+- **INITIAL_SUBMIT**（需要 Agent 处理） → `sessions_send` 触发 agent turn（静默，用户不可见）
+- **COUNTER_PROPOSAL / MEETING_FAILED**（需要用户决策） → `message tool` 直接发 + `prependContext` 让 Agent 下次处理
+- **CONFIRMED / OVER 等**（纯通知） → `message tool` 直接发给用户
+- **message tool** 仅在正式渠道（Telegram/Discord/Feishu）可用，webchat 不支持 → fallback 到 `sessions_send`
 - **pendingNotifications**（兜底）— 推送失败时暂存，下次 `before_prompt_build` 注入 prependContext
+
+### 推送渠道解析（多渠道叠加）
+- `parseChannelFromSessionKey(sk)` 从任意 sessionKey 解析 channel 和 target
+- sessionKey 格式: `"agent:<agentId>:<channel>:<kind>:<id>"`，kind 支持 group/channel/dm/direct
+- webchat/main sessionKey 返回 null（不支持 message tool）
+- 推送时：主 session (sessions_send) 永远推 + 所有已发现的额外渠道 (message tool) 叠加推
+
+### 多渠道自动发现
+- **启动时**：遍历 `api.config.channels`，找 `enabled: true` 的渠道，读 `~/.openclaw/credentials/{channel}-default-allowFrom.json` 自动发现推送目标
+- **运行时**：`before_prompt_build` 捕获所有非 webchat 渠道的 session，持续更新
+- **存储**：每个渠道独立持久化到 `channel-{name}.json`，重启后恢复
 
 ### Session 管理
 - 在 `before_prompt_build` 中捕获主 session（排除 cron/run/subagent 临时 session）
 - 持久化到 `session.json`，重启后恢复
-- Telegram 渠道单独保存 ctx，支持叠加推送
+- 额外渠道 session 单独追踪到 `extraChannels: Map<string, SessionContext>`
 
 ### 会议状态机
 ```
@@ -154,10 +192,10 @@ COLLECTING → ANALYZING → CONFIRMED
 | 文件 | 内容 |
 |------|------|
 | `credentials.json` | email, token, user_id |
-| `session.json` | sessionKey, channel, lastTo |
+| `session.json` | 主 session（sessionKey, channel） |
 | `notified-meetings.json` | 已通知的会议 ID 列表 |
 | `pending-decisions.json` | 等待用户决策的会议 ID 列表 |
-| `telegram-ctx.json` | Telegram 渠道 session |
+| `channel-{name}.json` | 各渠道 session（如 `channel-telegram.json`） |
 | `preferences.json` | 用户偏好（预留） |
 
 ## 开发注意事项
@@ -181,20 +219,104 @@ COLLECTING → ANALYZING → CONFIRMED
 
 ### 已完成
 
-1. **邮箱绑定改造为两步验证码流程**（方案 A：拆分两个 Tool）
+1. **邮箱绑定改造为两步验证码流程**（拆分两个 Tool）
    - `bind_identity` → `POST /api/auth/send-code`（发送验证码）
    - `verify_email_code`（新增） → `POST /api/auth/verify-bind`（校验验证码完成绑定）
    - 旧接口 `POST /api/auth/bind` 保留但标记 Deprecated
    - 变更文件: `api-client.ts`, `types/index.ts`, `bind-identity.ts`, `verify-email-code.ts`(新建), `index.ts`
    - curl 接口测试已通过
 
-2. **合入远程仓库必要改动**
+2. **合入远程仓库改动**
    - 时间格式约束 `00:00-23:59, never use 24:00`（`check-and-respond-tasks.ts`, `initiate-meeting.ts`）
    - `notifiedMeetings` 上限 200 条，超过时清除最早一半（`index.ts`）
-
-3. **未采用的远程改动**（有问题，暂不合入）
-   - Telegram 推送重构（从 sessionKey 解析 channel）— 依赖 sessionKey 格式约定不稳健，丢失叠加推送能力，dm 私聊被排除
+   - 推送策略重构：`getDirectMessageChannel()` 从 sessionKey 解析渠道，message tool 直发 + sessions_send fallback 分流
+   - 邮件服务切换到 Loops.so API（api-server 侧）
+   - 防止重复通知 + COLLECTING 状态机卡死修复
 
 ### 待测试
 
 - 通过 OpenClaw Agent 实际调用 `bind_identity` + `verify_email_code` 完成邮箱绑定全流程
+
+---
+
+## 2025-03-25 探索记录：消息注入 UX 问题
+
+### 问题描述
+
+插件通过 `sessions_send` 向 webchat 推送通知，导致两个严重 UX 问题：
+1. **注入消息以用户气泡形式显示** — 用户在 webchat 看到自己没发过的消息（`sessions_send` 以 `role: "user"` 写入 transcript）
+2. **框架 ping-pong + announce 产生额外消息** — "ANNOUNCE_SKIP"、"NO-reply-from-agent" 等工件（已通过 `delivery.mode=none` + `maxPingPongTurns=0` 消除）
+
+目前第 2 个问题已解决，第 1 个问题（用户气泡）是 `sessions_send` 的固有限制，需要找替代方案。
+
+### 已探索并排除的方案
+
+| 方案 | 结论 | 原因 |
+|------|------|------|
+| `chat.inject` via `/tools/invoke` | 不可行 | `chat.inject` 是 Gateway WS 方法，不是 tool；`/tools/invoke` 只路由 `createOpenClawTools()` 注册的工具 |
+| `chat.inject` via WebSocket | 不可行 | 需要 `operator.admin` scope；插件 token auth 无 device identity，gateway 的 `clearUnboundScopes()` 会清空所有 scope；device identity 需要加密密钥对配对流程，插件 SDK 不提供 |
+| `sessions_spawn` via `/tools/invoke` | 不可行 | 从插件后台调用时无"请求方 session"，announce step 无投递目标 |
+| `api.runtime.subagent.run()` | 部分可行 | 可运行任务（`deliver: false`），但无法主动推结果到 webchat |
+| 直接写 transcript 文件 | 部分可行 | 可写文件，但 webchat 不会实时刷新（无 broadcast 事件） |
+| `enqueueSystemEvent` + `requestHeartbeatNow` | **待定** | 函数存在且可调用，但实测 heartbeat runner 未触发（疑似模块实例隔离问题，见下文） |
+
+### chat.inject 不可用的根本原因
+
+`chat.inject` 是 OpenClaw 官方 Gateway WS 方法，功能完美（以 assistant 角色写入 transcript + 实时广播 + 不触发 agent turn），但安全模型阻止插件调用：
+
+1. 它是 WS 方法 → `/tools/invoke` 无法路由
+2. WS 调用需要 `operator.admin` scope → 实测返回 `missing scope: operator.admin`
+3. 获得 admin scope 需要 device identity（加密密钥对 + 配对流程）
+4. 插件 SDK 不提供 device identity API — 这是为前端客户端设计的
+
+### enqueueSystemEvent + requestHeartbeatNow 探索
+
+这是 OpenClaw 内部 cron jobs / notification events 向 main session 推送通知的官方机制：
+
+```typescript
+// 插件 SDK runtime 原生提供
+api.runtime.system.enqueueSystemEvent(notificationText, {
+  sessionKey: "agent:main:main",
+  contextKey: "clawmeeting:meeting-xxx"  // 自动去重
+});
+api.runtime.system.requestHeartbeatNow({ reason: "clawmeeting-notification" });
+```
+
+**实测结果**：
+- `api.runtime.system` 存在，两个函数类型均为 `function`
+- `enqueueSystemEvent` 调用成功无报错
+- `requestHeartbeatNow` 调用成功无报错
+- **但 heartbeat runner 从未实际执行**，webchat 无任何变化
+
+**疑似原因**：模块实例隔离 — 插件拿到的 `requestHeartbeatNow` 可能操作的是不同模块实例的 `pendingWakes` Map，与 gateway 主进程的 heartbeat handler 不在同一内存空间。需要进一步验证。
+
+**相关源码位置**：
+- `pi-embedded-CwMQzdKD.js:72005-72165` — heartbeat wake 系统（`pendingWakes` Map, `handler`, `schedule()`）
+- `runtime-D60f3HDj.js:606-613` — `createRuntimeSystem()` 返回 `enqueueSystemEvent` 和 `requestHeartbeatNow`
+- `gateway-cli-CJG95mu_.js:1697-1860` — `runHeartbeatOnce` 完整流程
+- `system-events-B97dSsCm.js:35-77` — `enqueueSystemEvent` 实现
+- `server-node-events-NTgh2HlT.js` — 官方使用范例（notification events 用同样的 enqueue + heartbeat 模式）
+
+### 当前状态与后续方向
+
+**当前方案**（已在用）：多渠道叠加推送
+- 主 session: `sessions_send` + `role: "system"` + `announce: false` + `delivery.mode: "none"`
+- 额外渠道（Telegram 等）: `message tool` 直发，不经过 LLM
+- 启动时自动从 `api.config.channels` + pairing allow store 发现推送目标
+- 运行时 `before_prompt_build` 持续捕获新渠道 session
+
+**待确认**（需向 OpenClaw 官方咨询）：
+- 插件 SDK 是否会新增 `api.runtime.chat.inject()` 或等价方法？
+- `sessions_send` 已支持 `role: "system"` 参数（避免用户气泡），但仍非 assistant 角色
+- `enqueueSystemEvent` + `requestHeartbeatNow` 在插件中不生效是 bug 还是设计如此？
+- 是否有其他官方推荐的插件主动推送机制？
+
+### 关键 OpenClaw 文档位置
+
+| 文档 | 路径 |
+|------|------|
+| Session Tools (sessions_send 参数) | `docs/concepts/session-tool.md` |
+| WebChat (chat.inject 行为) | `docs/web/webchat.md` |
+| Gateway WS 协议 (帧格式) | `docs/concepts/typebox.md` |
+| 插件 SDK runtime | `docs/plugins/sdk-runtime.md` |
+| Gateway 工具配置 | `docs/gateway/tools-invoke-http-api.md` |

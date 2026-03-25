@@ -75,6 +75,8 @@ export interface SubmitAvailabilityRequest {
   response_type: ResponseType;
   available_slots: string[];  // 服务端实际要求字符串格式 "2026-03-18 14:00-16:00"
   preference_note?: string;
+  duration_minutes?: number;  // FAILED→retry 时修改会议时长
+  invitees?: string[];        // FAILED→retry 时修改参与者列表（增减均可）
 }
 
 /** coordinator_result 子结构 */
@@ -104,7 +106,8 @@ export type MeetingStatus =
   | "ANALYZING"
   | "NEGOTIATING"
   | "CONFIRMED"
-  | "FAILED";
+  | "FAILED"
+  | "OVER";
 
 // ---- API 3: GET /api/meetings 会议列表 ----
 export interface MeetingListItem {
@@ -142,6 +145,7 @@ export interface MeetingDetailResponse {
   round_count: number;
   final_time: string | null;
   coordinator_reasoning: string | null;
+  meeting_link: string | null;
   participants: MeetingParticipant[];
 }
 
@@ -150,7 +154,8 @@ export type TaskType =
   | "INITIAL_SUBMIT"
   | "COUNTER_PROPOSAL"
   | "MEETING_CONFIRMED"
-  | "MEETING_FAILED";
+  | "MEETING_FAILED"
+  | "MEETING_OVER";
 
 export interface PendingTask {
   meeting_id: string;
@@ -160,6 +165,7 @@ export interface PendingTask {
   message: string;
   duration_minutes?: number;
   round_count?: number;
+  meeting_link?: string | null;
 }
 
 export interface PendingTasksResponse {

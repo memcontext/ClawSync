@@ -3,7 +3,7 @@
 // 管理 Token、用户偏好等的本地持久化
 // ============================================================
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import type { StoredCredentials, UserPreferences, SessionContext } from "../types/index.js";
@@ -133,17 +133,28 @@ export function loadSession(): SessionContext | null {
   }
 }
 
-// ---- Telegram Session 上下文 ----
-// 单独持久化 Telegram 渠道的 session，叠加推送用
+// ---- Telegram Session 上下文（向后兼容） ----
 
 export function saveTelegramCtx(ctx: SessionContext): void {
-  ensureDir();
-  const filePath = join(STORAGE_DIR, "telegram-ctx.json");
-  writeFileSync(filePath, JSON.stringify(ctx, null, 2), "utf-8");
+  saveChannelCtx("telegram", ctx);
 }
 
 export function loadTelegramCtx(): SessionContext | null {
-  const filePath = join(STORAGE_DIR, "telegram-ctx.json");
+  return loadChannelCtx("telegram");
+}
+
+// ---- 通用渠道 Session 上下文 ----
+// 每个渠道单独持久化，支持多渠道叠加推送
+
+export function saveChannelCtx(channel: string, ctx: SessionContext): void {
+  ensureDir();
+  const filePath = join(STORAGE_DIR, `channel-${channel}.json`);
+  writeFileSync(filePath, JSON.stringify(ctx, null, 2), "utf-8");
+}
+
+export function loadChannelCtx(channel: string): SessionContext | null {
+  ensureDir();
+  const filePath = join(STORAGE_DIR, `channel-${channel}.json`);
   if (!existsSync(filePath)) return null;
   try {
     const raw = readFileSync(filePath, "utf-8");
@@ -151,4 +162,24 @@ export function loadTelegramCtx(): SessionContext | null {
   } catch {
     return null;
   }
+}
+
+/** 加载所有已保存的渠道上下文 */
+export function loadAllChannelCtx(): Map<string, SessionContext> {
+  ensureDir();
+  const result = new Map<string, SessionContext>();
+  try {
+    const files = readdirSync(STORAGE_DIR).filter(f => f.startsWith("channel-") && f.endsWith(".json"));
+    for (const file of files) {
+      const channel = file.replace("channel-", "").replace(".json", "");
+      const raw = readFileSync(join(STORAGE_DIR, file), "utf-8");
+      const ctx = JSON.parse(raw) as SessionContext;
+      if (ctx?.sessionKey) {
+        result.set(channel, ctx);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return result;
 }
