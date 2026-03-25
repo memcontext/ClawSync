@@ -25,8 +25,8 @@ import {
   saveNotifiedMeetings,
   loadPendingDecisions,
   savePendingDecisions,
-  loadAllChannelCtx,
-  saveChannelCtx,
+  saveTelegramCtx,
+  loadTelegramCtx,
 } from "./src/utils/storage.js";
 import { PollingManager } from "./src/utils/polling-manager.js";
 
@@ -109,50 +109,38 @@ export default function register(api: any) {
   }
 
   // ============================================================
-  // 3. Session 管理
+  // 3. Session 管理（主 session + Telegram session 同等地位）
   // ============================================================
-  let sessionCtx: SessionContext = loadSession() ?? { sessionKey: "agent:main:main" };
-  if (sessionCtx.sessionKey) {
-    console.log(`[ClawMeeting] session: ${sessionCtx.sessionKey}`);
-  }
-
-  // ============================================================
-  // 3b. 多渠道叠加推送：自动发现所有活跃的非主 session 渠道
-  // 优先级：已捕获的 session > 从 pairing allow store 自动发现
-  // ============================================================
-  const extraChannels: Map<string, SessionContext> = loadAllChannelCtx();
-  if (extraChannels.size > 0) {
-    console.log(`[ClawMeeting] 已恢复 ${extraChannels.size} 个渠道: ${[...extraChannels.keys()].join(", ")}`);
-  }
-
-  // 自动发现：遍历 api.config.channels，找 enabled 的渠道，读 pairing allow store
-  // 排除 webchat（主 session 已覆盖）
   const WEBCHAT_CHANNELS = new Set(["webchat", "web", "main"]);
-  const channelsConfig = api.config?.channels ?? {};
-  for (const [channelName, channelCfg] of Object.entries(channelsConfig)) {
-    if (WEBCHAT_CHANNELS.has(channelName)) continue;
-    if (!(channelCfg as any)?.enabled) continue;
-    if (extraChannels.has(channelName)) continue; // 已有捕获的 session，跳过
 
-    // 尝试读取 pairing allow store: ~/.openclaw/credentials/{channel}-default-allowFrom.json
+  // 主 session（webchat）
+  let sessionCtx: SessionContext = loadSession() ?? { sessionKey: "agent:main:main" };
+  console.log(`[ClawMeeting] 主 session: ${sessionCtx.sessionKey}`);
+
+  // Telegram session（同等地位，同样的捕获/恢复/持久化逻辑）
+  let telegramCtx: SessionContext | null = loadTelegramCtx();
+  if (telegramCtx) {
+    console.log(`[ClawMeeting] Telegram session: ${telegramCtx.sessionKey}`);
+  }
+
+  // Telegram 自动发现：从 pairing allow store 读取
+  if (!telegramCtx) {
     try {
-      const allowStorePath = join(homedir(), ".openclaw", "credentials", `${channelName}-default-allowFrom.json`);
+      const allowStorePath = join(homedir(), ".openclaw", "credentials", "telegram-default-allowFrom.json");
       if (existsSync(allowStorePath)) {
         const storeData = JSON.parse(readFileSync(allowStorePath, "utf-8"));
         const allowFrom: string[] = storeData?.allowFrom ?? [];
         if (allowFrom.length > 0) {
-          const targetId = allowFrom[0];
-          const ctx: SessionContext = {
-            sessionKey: `agent:main:${channelName}:direct:${targetId}`,
-            channel: channelName,
+          telegramCtx = {
+            sessionKey: `agent:main:telegram:direct:${allowFrom[0]}`,
+            channel: "telegram",
           };
-          extraChannels.set(channelName, ctx);
-          saveChannelCtx(channelName, ctx);
-          console.log(`[ClawMeeting] 自动发现 ${channelName} 目标: ${targetId} (from pairing allow store)`);
+          saveTelegramCtx(telegramCtx);
+          console.log(`[ClawMeeting] Telegram 自动发现: ${allowFrom[0]} (from pairing allow store)`);
         }
       }
     } catch (err) {
-      console.log(`[ClawMeeting] 读取 ${channelName} allow store 失败: ${err}`);
+      console.log(`[ClawMeeting] 读取 Telegram allow store 失败: ${err}`);
     }
   }
 
@@ -171,61 +159,8 @@ export default function register(api: any) {
   }
 
   // ============================================================
-  // 5. 主动推送消息
-  // 分流策略：
-  //   纯通知（不需要 LLM）→ message tool 直接发给用户，零 announce 风险
-  //   需要 Agent 处理     → sessions_send 触发 agent turn
-  //
-  // message tool 仅在正式 channel（telegram/feishu/discord 等）可用
-  // webchat 不支持 message tool → fallback 到 sessions_send
+  // 5. 主动推送（sessions_send 到所有 session，agent 在每个 session 独立处理）
   // ============================================================
-
-  // getDirectMessageChannel 已由 parseChannelFromSessionKey 替代
-
-  /**
-   * 解析任意 sessionKey 的 channel + target（用于 message tool 直发）
-   */
-  function parseChannelFromSessionKey(sk: string | undefined): { channel: string; target: string } | null {
-    if (!sk) return null;
-    const rawParts = sk.split(":").filter(Boolean);
-    const parts = rawParts.length >= 3 && rawParts[0] === "agent" ? rawParts.slice(2) : rawParts;
-    if (parts.length < 3) return null;
-    const [channelRaw, kind, ...rest] = parts;
-    if (!channelRaw || channelRaw === "webchat" || channelRaw === "main") return null;
-    if (kind !== "group" && kind !== "channel" && kind !== "dm" && kind !== "direct") return null;
-    const restJoined = rest.join(":");
-    const id = restJoined.replace(/:(topic|thread):\d+$/, "").trim();
-    if (!id) return null;
-    return { channel: channelRaw, target: id };
-  }
-
-  /**
-   * 通过 message tool 直接发消息到指定 channel（不经过 LLM）
-   */
-  async function sendViaMessageTool(channel: string, target: string, message: string): Promise<boolean> {
-    try {
-      const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${gatewayToken}`,
-        },
-        body: JSON.stringify({
-          tool: "message",
-          args: { action: "send", channel, target, message },
-        }),
-      });
-      if (res.ok) {
-        console.log(`[ClawMeeting] message tool 发送成功 (${channel}:${target})`);
-        return true;
-      }
-      console.log(`[ClawMeeting] message tool 失败 (${channel}): ${res.status}`);
-      return false;
-    } catch (err) {
-      console.log(`[ClawMeeting] message tool 异常 (${channel}): ${err}`);
-      return false;
-    }
-  }
 
   /**
    * 通过 sessions_send 发送到指定 session，触发 agent turn
@@ -423,7 +358,8 @@ export default function register(api: any) {
     if (agentNotifications.length === 0) return userMessages;
 
     const batchMsg = agentNotifications.join("\n\n---\n\n");
-    console.log(`[ClawMeeting] 推送 ${agentNotifications.length} 条通知到 ${1 + extraChannels.size} 个 session`);
+    const sessionCount = 1 + (telegramCtx ? 1 : 0);
+    console.log(`[ClawMeeting] 推送 ${agentNotifications.length} 条通知到 ${sessionCount} 个 session`);
 
     // ---- 主 session ----
     const { ok: mainOk } = await sendViaSessionsSend(batchMsg);
@@ -437,12 +373,10 @@ export default function register(api: any) {
       userMessages.push(...agentNotifications);
     }
 
-    // ---- 额外渠道 session ----
-    const mainChannel = parseChannelFromSessionKey(sessionCtx.sessionKey);
-    for (const [channelName, ctx] of extraChannels) {
-      if (mainChannel && mainChannel.channel === channelName) continue;
-      const { ok } = await sendViaSessionsSend(batchMsg, ctx.sessionKey);
-      console.log(`[ClawMeeting] ${channelName} session 推送: ${ok ? "成功" : "失败"}`);
+    // ---- Telegram session ----
+    if (telegramCtx) {
+      const { ok } = await sendViaSessionsSend(batchMsg, telegramCtx.sessionKey);
+      console.log(`[ClawMeeting] Telegram session 推送: ${ok ? "成功" : "失败"}`);
     }
 
     return userMessages;
@@ -669,24 +603,19 @@ export default function register(api: any) {
         && !sessionKey.includes(":subagent:");
 
       if (isMainSession) {
-        // sessionCtx 只跟踪 webchat session（主推送目标）
-        // 避免 sessions_send 到 Telegram 时覆盖 sessionCtx
+        // 主 session 捕获（webchat）
         const isWebchat = !channel || WEBCHAT_CHANNELS.has(channel);
         if (isWebchat && (sessionKey !== sessionCtx?.sessionKey || channel !== sessionCtx?.channel)) {
           sessionCtx = { sessionKey, channel };
           saveSession(sessionCtx);
-          console.log(`[ClawMeeting] session updated: ${sessionKey} channel=${channel}`);
+          console.log(`[ClawMeeting] 主 session updated: ${sessionKey}`);
         }
 
-        // 额外渠道 session 自动捕获
-        if (channel && !WEBCHAT_CHANNELS.has(channel)) {
-          const existing = extraChannels.get(channel);
-          if (!existing || existing.sessionKey !== sessionKey) {
-            const ctx: SessionContext = { sessionKey, channel };
-            extraChannels.set(channel, ctx);
-            saveChannelCtx(channel, ctx);
-            console.log(`[ClawMeeting] ${channel} session captured: ${sessionKey}`);
-          }
+        // Telegram session 捕获（同等逻辑）
+        if (channel === "telegram" && (!telegramCtx || telegramCtx.sessionKey !== sessionKey)) {
+          telegramCtx = { sessionKey, channel };
+          saveTelegramCtx(telegramCtx);
+          console.log(`[ClawMeeting] Telegram session updated: ${sessionKey}`);
         }
       }
 
