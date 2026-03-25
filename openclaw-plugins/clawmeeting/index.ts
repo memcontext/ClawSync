@@ -229,10 +229,15 @@ export default function register(api: any) {
 
   /**
    * 通过 sessions_send 发送到指定 session，带超时
+   * 返回 { ok, agentReply? } — agentReply 为 agent 处理后的回复文本
    */
-  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<boolean> {
+  async function sendViaSessionsSend(
+    message: string,
+    sessionKey?: string,
+    timeoutMs = 15000,
+  ): Promise<{ ok: boolean; agentReply?: string }> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
@@ -257,18 +262,37 @@ export default function register(api: any) {
       clearTimeout(timeout);
 
       if (res.ok) {
+        const body = await res.text();
         console.log(`[ClawMeeting] 推送成功 (sessions_send → ${sessionKey ?? sessionCtx.sessionKey})`);
-        return true;
+        // 尝试从响应中提取 agent 回复
+        let agentReply: string | undefined;
+        try {
+          const json = JSON.parse(body);
+          // /tools/invoke 返回格式可能是 { content: [{ type: "text", text }] } 或其他
+          if (json.content?.[0]?.text) {
+            agentReply = json.content[0].text;
+          } else if (typeof json.text === "string") {
+            agentReply = json.text;
+          } else if (typeof json.result === "string") {
+            agentReply = json.result;
+          }
+        } catch {
+          if (body && body.length > 10) agentReply = body;
+        }
+        if (agentReply) {
+          console.log(`[ClawMeeting] agent 回复已捕获 (${agentReply.length} chars)`);
+        }
+        return { ok: true, agentReply };
       } else {
         const body = await res.text();
         console.error(`[ClawMeeting] 推送失败: ${res.status} ${body}`);
-        return false;
+        return { ok: false };
       }
     } catch (err) {
       clearTimeout(timeout);
       const errMsg = err instanceof Error ? err.message : String(err);
       console.log(`[ClawMeeting] sessions_send 未完成 (${errMsg})，将由 pendingNotifications 兜底`);
-      return false;
+      return { ok: false };
     }
   }
 
@@ -298,44 +322,13 @@ export default function register(api: any) {
   }
 
   /**
-   * 推送纯通知（CONFIRMED/OVER/FAILED 等）
-   * 策略：主 session (sessions_send) + 所有额外渠道叠加 (message tool)
-   */
-  async function pushNotification(message: string): Promise<boolean> {
-    if (!gatewayToken) {
-      console.log("[ClawMeeting] pushNotification 跳过: 无 gateway token");
-      return false;
-    }
-
-    console.log(`[ClawMeeting] pushNotification 开始: 主session=${sessionCtx.sessionKey}, extraChannels=${extraChannels.size}`);
-
-    // 1. 额外渠道立即并行推送（不等主 session，避免 sessions_send 阻塞导致 Telegram 漏发）
-    const extraPromise = pushToExtraChannels(message);
-
-    // 2. 主 session: 尝试 message tool 直发，不行则 sessions_send
-    const direct = parseChannelFromSessionKey(sessionCtx.sessionKey);
-    let mainOk = false;
-    if (direct) {
-      console.log(`[ClawMeeting] 主 session 直发: ${direct.channel}:${direct.target}`);
-      mainOk = await sendViaMessageTool(direct.channel, direct.target, message);
-    }
-    if (!mainOk) {
-      console.log("[ClawMeeting] 主 session fallback to sessions_send");
-      mainOk = await sendViaSessionsSend(message);
-    }
-
-    await extraPromise;
-    console.log(`[ClawMeeting] pushNotification 完成: mainOk=${mainOk}`);
-    return mainOk;
-  }
-
-  /**
    * 推送需要 Agent 静默处理的消息（INITIAL_SUBMIT 等）
    * 仅走 sessions_send 触发 agent turn，不推送给用户
    */
   async function pushAgentMessage(message: string): Promise<boolean> {
     if (!gatewayToken) return false;
-    return sendViaSessionsSend(message);
+    const { ok } = await sendViaSessionsSend(message);
+    return ok;
   }
 
 
@@ -360,43 +353,18 @@ export default function register(api: any) {
   let pendingNotifications: string[] = [];
 
   // ============================================================
-  // 8. 构建完整会议通知消息（含虚拟会议号）
+  // 8. 构建通知消息（供 agent 处理的结构化数据）
   // ============================================================
-  /** Build notification message for non-action task types (CONFIRMED/OVER/etc.) */
+  /** Build notification for agent to process (agent will generate user-friendly response) */
   function buildNotification(t: any): string {
-    const meetingId = t.meeting_id;
     const title = t.title ?? "未知会议";
     const taskType = t.task_type ?? "";
     const serverMessage = t.message ?? "";
 
-    if (taskType === "MEETING_CONFIRMED") {
-      const lines = [
-        `✅ Meeting "${title}" has been confirmed!`,
-        `Meeting #: ${meetingId}`,
-      ];
-      if (t.final_time) lines.push(`Time: ${t.final_time}`);
-      if (t.duration_minutes) lines.push(`Duration: ${t.duration_minutes} minutes`);
-      if (t.meeting_link) lines.push(`Link: ${t.meeting_link}`);
-      if (serverMessage) lines.push("", serverMessage);
-      return lines.join("\n");
-    }
-
-    if (taskType === "MEETING_FAILED") {
-      const lines = [
-        `❌ Meeting "${title}" negotiation failed.`,
-        `Meeting #: ${meetingId}`,
-      ];
-      if (serverMessage) lines.push("", serverMessage);
-      lines.push("", "You can choose:", "1. Cancel the meeting", "2. Retry with adjusted times");
-      return lines.join("\n");
-    }
-
-    if (taskType === "MEETING_OVER") {
-      return `📋 Meeting "${title}" (${meetingId}) has been cancelled.`;
-    }
-
-    // 其他未知类型
-    const lines = [`[ClawMeeting] ${taskType}`, `Meeting: "${title}"`, `Meeting #: ${meetingId}`];
+    const lines = [`[ClawMeeting ${taskType}]`, `Meeting: "${title}"`];
+    if (t.final_time) lines.push(`Time: ${t.final_time}`);
+    if (t.duration_minutes) lines.push(`Duration: ${t.duration_minutes} minutes`);
+    if (t.meeting_link) lines.push(`Meeting link: ${t.meeting_link}`);
     if (serverMessage) lines.push(serverMessage);
     return lines.join("\n");
   }
@@ -428,7 +396,6 @@ export default function register(api: any) {
           `[ClawMeeting Meeting Invitation]`,
           `Meeting: "${title}"`,
           `Meeting ID: ${meetingId}`,
-          `Meeting #: ${meetingId}`,
           `Organizer: ${t.initiator ?? "unknown"}`,
           `Duration: ${t.duration_minutes ?? "unknown"} minutes`,
         ];
@@ -469,8 +436,9 @@ export default function register(api: any) {
         const coordinatorMessage = t.message ?? "协调方发来了协商建议。";
 
         const notifyLines = [
-          `🔄 Meeting "${title}" needs your input (round ${roundCount})`,
-          `Meeting #: ${meetingId}`,
+          `[ClawMeeting COUNTER_PROPOSAL]`,
+          `Meeting: "${title}"`,
+          `Negotiation round: ${roundCount}`,
           `${coordinatorMessage}`,
         ];
         notifications.push(notifyLines.join("\n"));
@@ -489,13 +457,9 @@ export default function register(api: any) {
         savePendingDecisions([...pendingDecisions]);
 
         const notifyLines = [
-          `❌ Meeting "${title}" negotiation failed.`,
-          `Meeting #: ${meetingId}`,
-          `${t.message ?? ""}`,
-          "",
-          "You can choose:",
-          "1. Cancel the meeting",
-          "2. Retry with adjusted times",
+          `[ClawMeeting MEETING_FAILED]`,
+          `Meeting: "${title}"`,
+          `${t.message ?? "Meeting negotiation failed."}`,
         ];
         notifications.push(notifyLines.join("\n"));
         console.log(
@@ -537,17 +501,15 @@ export default function register(api: any) {
     }
 
     // ==== 分流推送 ====
-    // 1. 所有通知都推 Telegram（通过 message tool 直发）
-    // 2. INITIAL_SUBMIT 额外走 sessions_send 触发 agent turn
-    // 3. 其它通知走 pushNotification（主 session + Telegram）
-    const silentAgentTasks: string[] = [];     // INITIAL_SUBMIT → sessions_send
-    const silentMeetingIds: string[] = [];     // 对应 meeting_id，失败时回滚
-    const userVisibleMessages: string[] = [];  // 其他所有 → pushNotification
+    // INITIAL_SUBMIT → sessions_send 静默触发 agent（不推 Telegram）
+    // 其他通知     → sessions_send 触发 agent → 捕获 agent 回复 → 推 Telegram
+    const silentAgentTasks: string[] = [];
+    const silentMeetingIds: string[] = [];
+    const userVisibleMessages: string[] = [];
 
     for (const n of notifications) {
       if (n.includes("[ClawMeeting Meeting Invitation]")) {
         silentAgentTasks.push(n);
-        // 提取 meeting_id
         const idMatch = n.match(/Meeting ID: (mtg_\w+)/);
         if (idMatch) silentMeetingIds.push(idMatch[1]);
       } else {
@@ -555,28 +517,13 @@ export default function register(api: any) {
       }
     }
 
-    // 诊断日志
     console.log(`[ClawMeeting] 推送分流: silent=${silentAgentTasks.length}, user=${userVisibleMessages.length}, extraChannels=${extraChannels.size}`);
-    for (const [ch, ctx] of extraChannels) {
-      console.log(`[ClawMeeting]   渠道 ${ch}: ${ctx.sessionKey}`);
-    }
 
-    // ---- 用户可见消息立即推 Telegram（不等主 session）----
-    // 注意：INITIAL_SUBMIT 是给 Agent 静默处理的，不推给用户
-    if (userVisibleMessages.length > 0) {
-      const tgMsg = userVisibleMessages.join("\n\n---\n\n");
-      pushToExtraChannels(tgMsg).catch(err =>
-        console.log(`[ClawMeeting] Telegram 推送异常: ${err}`),
-      );
-    }
-
-    // ---- INITIAL_SUBMIT：sessions_send 触发 agent turn ----
+    // ---- INITIAL_SUBMIT：sessions_send 触发 agent（静默）----
     if (silentAgentTasks.length > 0) {
       const batchMsg = `[ClawMeeting Notifications]\n\n${silentAgentTasks.join("\n\n---\n\n")}`;
       const pushed = await pushAgentMessage(batchMsg);
       if (!pushed) {
-        // agent 失败 → 回滚 submittedMeetings，让下次轮询重试
-        // 安全：如果 agent 实际已处理，服务端不再返回 INITIAL_SUBMIT，下次轮询自然跳过
         for (const mid of silentMeetingIds) {
           submittedMeetings.delete(mid);
         }
@@ -584,21 +531,22 @@ export default function register(api: any) {
       }
     }
 
-    // ---- 用户可见消息：推送到主 session ----
+    // ---- 用户可见消息：sessions_send → agent 处理 → 捕获回复 → 推 Telegram ----
     if (userVisibleMessages.length > 0) {
-      console.log(`[ClawMeeting] 准备推送 ${userVisibleMessages.length} 条用户可见消息到主 session`);
+      console.log(`[ClawMeeting] 准备推送 ${userVisibleMessages.length} 条用户可见消息`);
       const batchMsg = userVisibleMessages.join("\n\n---\n\n");
-      // 主 session: 尝试 message tool 直发，不行则 sessions_send
-      const direct = parseChannelFromSessionKey(sessionCtx.sessionKey);
-      let mainOk = false;
-      if (direct) {
-        mainOk = await sendViaMessageTool(direct.channel, direct.target, batchMsg);
-      }
-      if (!mainOk) {
-        mainOk = await sendViaSessionsSend(batchMsg);
-      }
-      if (!mainOk) {
-        console.log("[ClawMeeting] 主 session 推送失败，消息放入 pendingNotifications 兜底");
+      const { ok, agentReply } = await sendViaSessionsSend(batchMsg, undefined, 30000);
+
+      if (ok) {
+        // agent 已在主 session 回复用户，把 agent 的回复转发到 Telegram
+        const tgMsg = agentReply || batchMsg; // fallback: agent 回复无法提取时用原始通知
+        pushToExtraChannels(tgMsg).catch(err =>
+          console.log(`[ClawMeeting] Telegram 推送异常: ${err}`),
+        );
+      } else {
+        // sessions_send 失败：直接推原始通知到 Telegram，主 session 走 pendingNotifications 兜底
+        console.log("[ClawMeeting] 主 session 推送失败，原始通知推 Telegram + pendingNotifications 兜底");
+        pushToExtraChannels(batchMsg).catch(() => {});
         userMessages.push(...userVisibleMessages);
       }
     }
