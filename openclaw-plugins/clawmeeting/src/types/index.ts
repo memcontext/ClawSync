@@ -10,7 +10,18 @@ export interface ApiResponse<T = unknown> {
   message?: string;
 }
 
-// ---- API 1: POST /api/auth/bind 身份认证 ----
+// ---- API 1a: POST /api/auth/send-code 发送验证码 ----
+export interface SendCodeRequest {
+  email: string;
+}
+
+// ---- API 1b: POST /api/auth/verify-bind 验证码校验 + 绑定 ----
+export interface VerifyBindRequest {
+  email: string;
+  code: string;
+}
+
+// ---- API 1 (Deprecated): POST /api/auth/bind 直接绑定 ----
 export interface BindAuthRequest {
   email: string;
 }

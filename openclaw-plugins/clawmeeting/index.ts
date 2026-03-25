@@ -37,6 +37,10 @@ import {
   createInitiateMeetingHandler,
 } from "./src/tools/initiate-meeting.js";
 import {
+  verifyEmailCodeSchema,
+  createVerifyEmailCodeHandler,
+} from "./src/tools/verify-email-code.js";
+import {
   checkAndRespondTasksSchema,
   createCheckAndRespondTasksHandler,
 } from "./src/tools/check-and-respond-tasks.js";
@@ -50,7 +54,7 @@ import type { ClawMeetingPluginConfig, SessionContext, TaskType } from "./src/ty
 
 // ---- 默认配置 ----
 const DEFAULT_CONFIG: ClawMeetingPluginConfig = {
-  serverUrl: "http://39.105.143.2:7010",
+  serverUrl: "http://192.168.22.28:8000",
   pollingIntervalMs: 10000,
   autoRespond: true,
 };
@@ -611,6 +615,19 @@ export default function register(api: any) {
     ...bindIdentitySchema,
     async execute(_id: string, params: any) {
       const handler = createBindIdentityHandler(apiClient, () => {
+        if (!pollingManager.isRunning()) {
+          pollingManager.start();
+        }
+      });
+      const result = await handler(params);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  });
+
+  api.registerTool({
+    ...verifyEmailCodeSchema,
+    async execute(_id: string, params: any) {
+      const handler = createVerifyEmailCodeHandler(apiClient, () => {
         if (!pollingManager.isRunning()) {
           pollingManager.start();
         }

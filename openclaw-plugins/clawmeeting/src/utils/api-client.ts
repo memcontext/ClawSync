@@ -8,6 +8,8 @@ import type {
   ApiResponse,
   BindAuthRequest,
   BindAuthResponse,
+  SendCodeRequest,
+  VerifyBindRequest,
   InitiateMeetingRequest,
   InitiateMeetingResponse,
   MeetingListResponse,
@@ -67,7 +69,45 @@ export class ClawMeetingApiClient {
   }
 
   // ============================================================
-  // API 1: POST /api/auth/bind — 邮箱绑定/注册
+  // API 1a: POST /api/auth/send-code — 发送验证码
+  // ============================================================
+  async sendVerificationCode(email: string): Promise<{ message: string }> {
+    const url = `${this.baseUrl}/api/auth/send-code`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email } as SendCodeRequest),
+    });
+    const json = (await res.json()) as ApiResponse<null>;
+
+    // send-code 限频时返回 HTTP 200 但 code=429，验证失败 code=400/500
+    // 统一将 message 返回给上层，不抛异常
+    return { message: json.message ?? "验证码已发送" };
+  }
+
+  // ============================================================
+  // API 1b: POST /api/auth/verify-bind — 验证码校验 + 绑定注册
+  // ============================================================
+  async verifyAndBind(email: string, code: string): Promise<{ success: boolean; message: string; data?: BindAuthResponse }> {
+    const url = `${this.baseUrl}/api/auth/verify-bind`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, code } as VerifyBindRequest),
+    });
+    const json = (await res.json()) as ApiResponse<BindAuthResponse>;
+
+    // verify-bind 验证失败时返回 HTTP 200 但 code=400
+    if (json.code !== 200 || !json.data?.token) {
+      return { success: false, message: json.message ?? "验证失败" };
+    }
+
+    this.setToken(json.data.token);
+    return { success: true, message: json.message ?? "验证成功", data: json.data };
+  }
+
+  // ============================================================
+  // API 1 (Deprecated): POST /api/auth/bind — 直接绑定（无验证）
   // ============================================================
   async bindEmail(email: string): Promise<BindAuthResponse> {
     const payload: BindAuthRequest = { email };
