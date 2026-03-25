@@ -372,9 +372,10 @@ async def submit_availability(
                     context={"meeting_id": meeting_id}
                 )
                 meeting.status = new_state.value
+                meeting.round_count = 0
                 meeting.updated_at = datetime.utcnow()
                 state_logger.info(
-                    f"FAILED→COLLECTING | {meeting_id} | {meeting.title} | 发起人重新发起"
+                    f"FAILED→COLLECTING | {meeting_id} | {meeting.title} | 发起人重新发起 | round_count 已重置为 0"
                 )
 
                 # 更新发起人的时间
