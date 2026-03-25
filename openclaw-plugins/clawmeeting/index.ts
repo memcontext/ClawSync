@@ -62,16 +62,6 @@ const DEFAULT_CONFIG: ClawMeetingPluginConfig = {
   autoRespond: true,
 };
 
-// ---- 生成虚拟会议号 (基于 meeting_id 的简短数字) ----
-function generateMeetingNumber(meetingId: string): string {
-  let hash = 0;
-  for (let i = 0; i < meetingId.length; i++) {
-    hash = ((hash << 5) - hash + meetingId.charCodeAt(i)) & 0x7fffffff;
-  }
-  // 生成 9 位数字，格式 xxx-xxx-xxx
-  const num = String(hash).padStart(9, "0").slice(0, 9);
-  return `${num.slice(0, 3)}-${num.slice(3, 6)}-${num.slice(6, 9)}`;
-}
 
 // ---- 从 manifest 读取插件 ID ----
 function readPluginId(): string {
@@ -375,41 +365,39 @@ export default function register(api: any) {
   /** Build notification message for non-action task types (CONFIRMED/OVER/etc.) */
   function buildNotification(t: any): string {
     const meetingId = t.meeting_id;
-    const meetingNumber = generateMeetingNumber(meetingId);
     const title = t.title ?? "未知会议";
     const taskType = t.task_type ?? "";
     const serverMessage = t.message ?? "";
 
-    // 状态映射为人类可读文本
-    const statusMap: Record<string, string> = {
-      MEETING_CONFIRMED: "✅ Meeting Confirmed",
-      MEETING_OVER: "📋 Meeting Over",
-      MEETING_FAILED: "❌ Meeting Failed",
-    };
-    const statusText = statusMap[taskType] ?? taskType;
-
-    const lines = [
-      `[ClawMeeting Notification]`,
-      `${statusText}`,
-      `Meeting: "${title}"`,
-      `Meeting #: ${meetingNumber}`,
-    ];
-
     if (taskType === "MEETING_CONFIRMED") {
-      if (t.final_time) {
-        lines.push(`Time: ${t.final_time}`);
-      }
-      if (t.duration_minutes) {
-        lines.push(`Duration: ${t.duration_minutes} minutes`);
-      }
-      if (t.meeting_link) {
-        lines.push(`Meeting link: ${t.meeting_link}`);
-      }
+      const lines = [
+        `✅ Meeting "${title}" has been confirmed!`,
+        `Meeting #: ${meetingId}`,
+      ];
+      if (t.final_time) lines.push(`Time: ${t.final_time}`);
+      if (t.duration_minutes) lines.push(`Duration: ${t.duration_minutes} minutes`);
+      if (t.meeting_link) lines.push(`Link: ${t.meeting_link}`);
+      if (serverMessage) lines.push("", serverMessage);
+      return lines.join("\n");
     }
 
-    if (serverMessage) {
-      lines.push(serverMessage);
+    if (taskType === "MEETING_FAILED") {
+      const lines = [
+        `❌ Meeting "${title}" negotiation failed.`,
+        `Meeting #: ${meetingId}`,
+      ];
+      if (serverMessage) lines.push("", serverMessage);
+      lines.push("", "You can choose:", "1. Cancel the meeting", "2. Retry with adjusted times");
+      return lines.join("\n");
     }
+
+    if (taskType === "MEETING_OVER") {
+      return `📋 Meeting "${title}" (${meetingId}) has been cancelled.`;
+    }
+
+    // 其他未知类型
+    const lines = [`[ClawMeeting] ${taskType}`, `Meeting: "${title}"`, `Meeting #: ${meetingId}`];
+    if (serverMessage) lines.push(serverMessage);
     return lines.join("\n");
   }
 
@@ -440,7 +428,7 @@ export default function register(api: any) {
           `[ClawMeeting Meeting Invitation]`,
           `Meeting: "${title}"`,
           `Meeting ID: ${meetingId}`,
-          `Meeting #: ${generateMeetingNumber(meetingId)}`,
+          `Meeting #: ${meetingId}`,
           `Organizer: ${t.initiator ?? "unknown"}`,
           `Duration: ${t.duration_minutes ?? "unknown"} minutes`,
         ];
@@ -481,11 +469,9 @@ export default function register(api: any) {
         const coordinatorMessage = t.message ?? "协调方发来了协商建议。";
 
         const notifyLines = [
-          `[ClawMeeting Negotiation Update]`,
-          `Meeting: "${title}"`,
-          `Meeting #: ${generateMeetingNumber(meetingId)}`,
-          `Negotiation round: ${roundCount}`,
-          `Coordinator message: ${coordinatorMessage}`,
+          `🔄 Meeting "${title}" needs your input (round ${roundCount})`,
+          `Meeting #: ${meetingId}`,
+          `${coordinatorMessage}`,
         ];
         notifications.push(notifyLines.join("\n"));
 
@@ -503,11 +489,9 @@ export default function register(api: any) {
         savePendingDecisions([...pendingDecisions]);
 
         const notifyLines = [
-          `[ClawMeeting Negotiation Failed]`,
-          `Meeting: "${title}"`,
-          `Meeting ID: ${meetingId}`,
-          `Meeting #: ${generateMeetingNumber(meetingId)}`,
-          `${t.message ?? "Meeting negotiation failed."}`,
+          `❌ Meeting "${title}" negotiation failed.`,
+          `Meeting #: ${meetingId}`,
+          `${t.message ?? ""}`,
           "",
           "You can choose:",
           "1. Cancel the meeting",
@@ -577,10 +561,11 @@ export default function register(api: any) {
       console.log(`[ClawMeeting]   渠道 ${ch}: ${ctx.sessionKey}`);
     }
 
-    // ---- 所有通知立即推 Telegram（不等主 session）----
-    if (notifications.length > 0) {
-      const allMsg = notifications.join("\n\n---\n\n");
-      pushToExtraChannels(allMsg).catch(err =>
+    // ---- 用户可见消息立即推 Telegram（不等主 session）----
+    // 注意：INITIAL_SUBMIT 是给 Agent 静默处理的，不推给用户
+    if (userVisibleMessages.length > 0) {
+      const tgMsg = userVisibleMessages.join("\n\n---\n\n");
+      pushToExtraChannels(tgMsg).catch(err =>
         console.log(`[ClawMeeting] Telegram 推送异常: ${err}`),
       );
     }
