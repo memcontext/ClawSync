@@ -331,6 +331,9 @@ async def submit_availability(
 
         elif submit_data.response_type == ResponseType.ACCEPT_PROPOSAL:
             # ====== ACCEPT_PROPOSAL：接受妥协方案 ======
+            # 将 Agent 建议的时间写入 latest_slots，确保 ANALYZING 时 Agent 使用正确数据
+            if negotiation_log.suggested_slots:
+                negotiation_log.latest_slots = negotiation_log.suggested_slots
             negotiation_log.action_required = False
             negotiation_log.counter_proposal_message = None
             negotiation_log.updated_at = datetime.utcnow()
