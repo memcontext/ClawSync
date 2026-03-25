@@ -5,7 +5,7 @@
 #       -> Invitee accepts proposal -> Final CONFIRMED or FAILED
 # Initiator: upp@132.com  |  Invitee: yueyao@email.com
 
-$serverUrl = "http://39.105.143.2:7010"
+$serverUrl = "http://192.168.22.28:8000"
 $token132 = "sk-FVklq4YEBJ4GOy3z8d43b780bb9ef86d"
 $passCount = 0
 $failCount = 0

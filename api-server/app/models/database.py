@@ -31,6 +31,7 @@ class Meeting(Base):
     final_time = Column(String(100), nullable=True)  # 字符串格式: "2026-03-18 15:00-15:30"
     round_count = Column(Integer, default=0)
     coordinator_reasoning = Column(Text, nullable=True)  # Coordinator 的分析理由
+    meeting_link = Column(String(500), nullable=True)  # 会议链接（Zoom/Google Meet）
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

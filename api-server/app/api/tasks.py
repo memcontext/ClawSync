@@ -91,7 +91,8 @@ async def get_pending_tasks(
                 "suggested_slots": log.suggested_slots or [],
                 "initiator_slots": _initiator_slots,
                 "duration_minutes": meeting.duration_minutes,
-                "round_count": meeting.round_count
+                "round_count": meeting.round_count,
+                "meeting_link": meeting.meeting_link
             })
 
             # 通知型任务（CONFIRMED/FAILED/OVER）：读即消费，防止重复推送

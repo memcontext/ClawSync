@@ -48,18 +48,35 @@ async def create_meeting(
         )
         db.add(initiator_log)
 
-        # ---- 3. 为每位受邀人创建用户（如不存在）及协商日志 ----
-        from ..utils.token import generate_token
+        # ---- 2.4 检查发起人邮箱验证状态 ----
+        if not current_user.email_verified:
+            db.rollback()
+            return APIResponse(
+                code=403,
+                message="您的邮箱尚未完成验证绑定，请先通过 /api/auth/send-code 和 /api/auth/verify-bind 完成邮箱验证",
+                data=None
+            )
+
+        # ---- 2.5 检查被邀请人邮箱注册状态 ----
+        unregistered = []
         for invitee_email in meeting_data.invitees:
             invitee = db.query(User).filter(User.email == invitee_email).first()
-            if not invitee:
-                invitee = User(
-                    email=invitee_email,
-                    token=generate_token(invitee_email),
-                    created_at=datetime.utcnow()
-                )
-                db.add(invitee)
-                db.flush()
+            if not invitee or not invitee.email_verified:
+                unregistered.append(invitee_email)
+
+        if unregistered:
+            db.rollback()
+            return APIResponse(
+                code=400,
+                message=f"以下被邀请人尚未完成邮箱注册绑定，请通知他们先注册：{', '.join(unregistered)}",
+                data={
+                    "unregistered_emails": unregistered
+                }
+            )
+
+        # ---- 3. 为每位受邀人查询用户及协商日志 ----
+        for invitee_email in meeting_data.invitees:
+            invitee = db.query(User).filter(User.email == invitee_email).first()
 
             participant_log = NegotiationLog(
                 meeting_id=meeting_id,
@@ -142,6 +159,7 @@ async def list_my_meetings(
                 "duration_minutes": meeting.duration_minutes,
                 "round_count": meeting.round_count,
                 "final_time": meeting.final_time,
+                "meeting_link": meeting.meeting_link,
                 "progress": f"{submitted}/{total}",
                 "created_at": meeting.created_at.isoformat() if meeting.created_at else None
             })
@@ -206,6 +224,7 @@ async def get_meeting_status(
                 "round_count": meeting.round_count,
                 "final_time": meeting.final_time,
                 "coordinator_reasoning": meeting.coordinator_reasoning,
+                "meeting_link": meeting.meeting_link,
                 "participants": participants_info
             }
         )

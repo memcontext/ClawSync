@@ -134,20 +134,47 @@ async def submit_coordination_result(
             meeting.updated_at = datetime.utcnow()
             state_logger.info(f"CONFIRMED | {meeting_id} | {meeting.title} | final_time={result.final_time}")
 
+            # CONFIRMED：自动生成 Zoom 会议链接
+            if not meeting.meeting_link:
+                from ..services.zoom_meeting_service import create_zoom_meeting
+                zoom_result = create_zoom_meeting(
+                    title=meeting.title,
+                    duration_minutes=meeting.duration_minutes,
+                )
+                if zoom_result:
+                    meeting.meeting_link = zoom_result["join_url"]
+
             # CONFIRMED：全体参会人统一收到确认通知
             logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
+            link_text = f"\n会议链接：{meeting.meeting_link}" if meeting.meeting_link else ""
             for log in logs:
                 log.action_required = True
                 log.counter_proposal_message = (
                     f"✅ 会议已确认！\n"
                     f"会议：{meeting.title}\n"
                     f"时间：{result.final_time}\n"
-                    f"时长：{meeting.duration_minutes} 分钟\n"
+                    f"时长：{meeting.duration_minutes} 分钟{link_text}\n"
                     f"请确认参加。"
                 )
                 log.updated_at = datetime.utcnow()
+
+            # 发送会议确认邮件给所有参会人
+            from ..services.email_service import send_meeting_confirmed_email
+            initiator = db.query(User).filter(User.id == meeting.initiator_id).first()
+            initiator_email = initiator.email if initiator else "unknown"
+            for log in logs:
+                user = db.query(User).filter(User.id == log.user_id).first()
+                if user and user.email:
+                    send_meeting_confirmed_email(
+                        to_email=user.email,
+                        meeting_title=meeting.title,
+                        final_time=result.final_time,
+                        duration_minutes=meeting.duration_minutes,
+                        meeting_link=meeting.meeting_link,
+                        initiator_email=initiator_email,
+                    )
 
         elif result.decision_status == DecisionStatus.NEGOTIATING:
             # ====== 场景 B: 需要协商 → ANALYZING → COLLECTING（重新收集） ======
