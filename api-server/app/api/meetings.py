@@ -5,7 +5,7 @@ from datetime import datetime
 from ..models.database import User, Meeting, NegotiationLog
 from ..models.schemas import MeetingCreate, SubmitAvailabilityRequest, APIResponse, ResponseType
 from ..utils.deps import get_db, get_current_user
-from ..utils.token import generate_meeting_id
+from ..utils.token import generate_meeting_id, generate_token
 from ..core.state_machine import StateMachine, MeetingState
 import logging
 
@@ -396,8 +396,17 @@ async def submit_availability(
                 meeting.status = new_state.value
                 meeting.round_count = 0
                 meeting.updated_at = datetime.utcnow()
+
+                # ---- 更新会议参数（如果发起人提供了新参数）----
+                changes = []
+                if submit_data.duration_minutes is not None and submit_data.duration_minutes != meeting.duration_minutes:
+                    old_duration = meeting.duration_minutes
+                    meeting.duration_minutes = submit_data.duration_minutes
+                    changes.append(f"时长: {old_duration}→{submit_data.duration_minutes}分钟")
+
                 state_logger.info(
                     f"FAILED→COLLECTING | {meeting_id} | {meeting.title} | 发起人重新发起 | round_count 已重置为 0"
+                    + (f" | 参数变更: {', '.join(changes)}" if changes else "")
                 )
 
                 # 更新发起人的时间
@@ -408,7 +417,75 @@ async def submit_availability(
                 negotiation_log.counter_proposal_message = None
                 negotiation_log.updated_at = datetime.utcnow()
 
-                # 重置所有被邀请人为待提交
+                # ---- 处理参与者变更 ----
+                if submit_data.invitees is not None:
+                    new_invitee_set = set(submit_data.invitees)
+                    # 不能邀请自己
+                    new_invitee_set.discard(current_user.email)
+
+                    # 检查新增受邀人是否已注册
+                    unregistered = []
+                    for invitee_email in new_invitee_set:
+                        invitee = db.query(User).filter(User.email == invitee_email).first()
+                        if not invitee or not invitee.email_verified:
+                            unregistered.append(invitee_email)
+                    if unregistered:
+                        db.rollback()
+                        return APIResponse(
+                            code=400,
+                            message=f"以下被邀请人尚未完成邮箱注册绑定：{', '.join(unregistered)}",
+                            data={"unregistered_emails": unregistered}
+                        )
+
+                    # 当前参与者（不含发起人）
+                    existing_logs = db.query(NegotiationLog).filter(
+                        NegotiationLog.meeting_id == meeting_id,
+                        NegotiationLog.user_id != current_user.id
+                    ).all()
+                    existing_emails = {}
+                    for log in existing_logs:
+                        user = db.query(User).filter(User.id == log.user_id).first()
+                        if user:
+                            existing_emails[user.email] = log
+
+                    # 移除不再被邀请的参与者
+                    for email, log in existing_emails.items():
+                        if email not in new_invitee_set:
+                            db.delete(log)
+                            changes.append(f"移除: {email}")
+
+                    # 添加新参与者
+                    for invitee_email in new_invitee_set:
+                        if invitee_email not in existing_emails:
+                            invitee = db.query(User).filter(User.email == invitee_email).first()
+                            new_log = NegotiationLog(
+                                meeting_id=meeting_id,
+                                user_id=invitee.id,
+                                role="participant",
+                                latest_slots=[],
+                                preference_note=None,
+                                action_required=True,
+                                counter_proposal_message=(
+                                    f"📋 会议邀请\n"
+                                    f"会议：{meeting.title}\n"
+                                    f"发起人邀请您参加此会议，请提交您的空闲时间。"
+                                ),
+                            )
+                            db.add(new_log)
+                            changes.append(f"新增: {invitee_email}")
+
+                    if changes:
+                        state_logger.info(f"参与者变更 | {meeting_id} | {', '.join(changes)}")
+
+                # 构建通知消息
+                change_desc = "发起人调整了会议参数，" if changes else ""
+                notify_msg = (
+                    f"📋 会议重新发起\n"
+                    f"会议：{meeting.title}\n"
+                    f"{change_desc}请重新提交您的空闲时间。"
+                )
+
+                # 重置所有被邀请人为待提交（新增的已在上面设置）
                 all_logs = db.query(NegotiationLog).filter(
                     NegotiationLog.meeting_id == meeting_id
                 ).all()
@@ -416,11 +493,8 @@ async def submit_availability(
                     if log.user_id != current_user.id:
                         log.action_required = True
                         log.latest_slots = []
-                        log.counter_proposal_message = (
-                            f"📋 会议重新发起\n"
-                            f"会议：{meeting.title}\n"
-                            f"发起人调整了时间，请重新提交您的空闲时间。"
-                        )
+                        if not log.counter_proposal_message:  # 新增参与者已有消息
+                            log.counter_proposal_message = notify_msg
                         log.suggested_slots = None
                         log.updated_at = datetime.utcnow()
 
@@ -433,6 +507,7 @@ async def submit_availability(
                         "response_type": submit_data.response_type.value,
                         "status": meeting.status,
                         "all_submitted": False,
+                        "changes": changes if changes else None,
                     }
                 )
 

@@ -56,12 +56,18 @@ class SubmitAvailabilityRequest(BaseModel):
     {
         "response_type": "INITIAL",
         "available_slots": ["2026-03-18 15:00-17:00"],
-        "preference_note": "..."
+        "preference_note": "...",
+        "duration_minutes": 60,
+        "invitees": ["new@example.com"]
     }
+    duration_minutes 和 invitees 仅在 FAILED 状态下发起人重新发起时可用，
+    用于修改会议参数后开始新一轮协商。
     """
     response_type: ResponseType = ResponseType.INITIAL
     available_slots: List[str] = []  # 格式统一: ["2026-03-18 15:00-17:00"]
     preference_note: Optional[str] = None
+    duration_minutes: Optional[int] = None  # FAILED 重新发起时可修改时长
+    invitees: Optional[List[EmailStr]] = None  # FAILED 重新发起时可修改参与者
 
 
 class CounterProposalItem(BaseModel):

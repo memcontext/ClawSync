@@ -92,6 +92,17 @@ export const checkAndRespondTasksSchema = {
         type: "string" as const,
         description: "User's preference note or remarks (optional)",
       },
+      duration_minutes: {
+        type: "number" as const,
+        description:
+          "New meeting duration in minutes (optional, only for FAILED→retry: initiator can modify the meeting duration)",
+      },
+      invitees: {
+        type: "array" as const,
+        items: { type: "string" as const },
+        description:
+          "New invitee email list (optional, only for FAILED→retry: initiator can add/remove participants)",
+      },
     },
     required: [],
   },
@@ -122,14 +133,15 @@ function buildInitialSubmitInfo(task: PendingTask): object {
       "Please tell me when you're available and I'll submit for you.",
     ].join("\n"),
     instruction: [
-      "Received a meeting invitation. Need to submit available time slots. ",
-      "【Important】First show display_to_user content to the user, including the organizer's proposed slots. ",
-      "Then follow this exact order: ",
+      "Received a meeting invitation. Silently handle it without showing the raw invitation to the user. ",
+      "Follow this exact order: ",
       "Step 1: Check if the user has a connected calendar. If yes, you MUST query it to get their real schedule. ",
       "Step 2: Check your memory for schedule info the user mentioned (business trips, doctor appointments, picking up kids, dinner plans, etc.) and meeting preferences. ",
-      "Step 3: Combine calendar data (if available) + memory clues + organizer's proposed slots to select suitable times. ",
-      "Then call this tool to submit: meeting_id, response_type='INITIAL', available_slots. ",
-      "Only ask the user if they have NO connected calendar AND your memory has NO schedule info at all.",
+      "Step 3: If calendar or memory provides schedule info, combine them with the organizer's proposed slots to select suitable times, ",
+      "then call this tool to submit: meeting_id, response_type='INITIAL', available_slots. ",
+      "After successful submission, briefly inform the user: which meeting was received, what times you submitted, and why. ",
+      "Step 4: If you have NO connected calendar AND your memory has NO schedule info at all, ",
+      "then ask the user for their available times before submitting.",
     ].join(""),
   };
 }
@@ -170,6 +182,39 @@ function buildCounterProposalInfo(task: PendingTask): object {
   };
 }
 
+// ---- Internal: build MEETING_FAILED task info ----
+function buildFailedInfo(task: PendingTask): object {
+  return {
+    meeting_id: task.meeting_id,
+    title: task.title,
+    action: "NEEDS_USER_DECISION",
+    task_type: "MEETING_FAILED",
+    initiator: task.initiator,
+    duration_minutes: task.duration_minutes ?? null,
+    round_count: task.round_count ?? 0,
+    server_message: task.message,
+    display_to_user: [
+      `❌ Meeting "${task.title}" negotiation failed`,
+      `Reason: ${task.message ?? "Unable to find a common time."}`,
+      "",
+      "You can choose:",
+      "1. Cancel this meeting",
+      "2. Modify meeting parameters (times, duration, participants) and start a new round of negotiation",
+    ].join("\n"),
+    instruction: [
+      "Meeting negotiation has failed. The initiator needs to decide next steps. ",
+      "【Important】Show the display_to_user content to the user, including the failure reason. ",
+      "Then wait for the user's decision: ",
+      "  - User wants to cancel → call this tool with meeting_id + response_type='REJECT' (meeting ends, status → OVER) ",
+      "  - User wants to modify parameters and retry → ask what they want to change (times / duration / participants), ",
+      "    then call this tool with meeting_id + response_type='INITIAL' + available_slots, ",
+      "    and optionally include duration_minutes and/or invitees if the user wants to change them. ",
+      "    This restarts the negotiation with the updated parameters. ",
+      "Do NOT proceed without the user's explicit choice.",
+    ].join(""),
+  };
+}
+
 /** Tool handler function */
 export function createCheckAndRespondTasksHandler(
   apiClient: ClawMeetingApiClient,
@@ -179,8 +224,10 @@ export function createCheckAndRespondTasksHandler(
     response_type?: ResponseType;
     available_slots?: TimeSlot[];
     preference_note?: string;
+    duration_minutes?: number;
+    invitees?: string[];
   }) => {
-    const { meeting_id, response_type, available_slots, preference_note } =
+    const { meeting_id, response_type, available_slots, preference_note, duration_minutes, invitees } =
       params;
 
     // Check Token
@@ -212,11 +259,14 @@ export function createCheckAndRespondTasksHandler(
         return `${startDate} ${startTime}-${endTime}`;
       });
 
-      const submitData = {
+      const submitData: Record<string, unknown> = {
         response_type,
         available_slots: slotsAsStrings,
         preference_note,
       };
+      // FAILED→retry: pass modified meeting parameters if provided
+      if (duration_minutes !== undefined) submitData.duration_minutes = duration_minutes;
+      if (invitees !== undefined) submitData.invitees = invitees;
 
       try {
         const result = await apiClient.submitAvailability(
@@ -310,8 +360,12 @@ export function createCheckAndRespondTasksHandler(
             results.push(info);
             break;
           }
+          case "MEETING_FAILED": {
+            results.push(buildFailedInfo(task));
+            break;
+          }
           default:
-            // All notification types (CONFIRMED, FAILED, OVER, etc.) — unified handling
+            // Notification types (CONFIRMED, OVER, etc.) — unified handling
             results.push({
               meeting_id: task.meeting_id,
               title: task.title,
