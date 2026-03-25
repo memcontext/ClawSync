@@ -258,7 +258,9 @@ export default function register(api: any) {
       clearTimeout(timeout);
 
       if (res.ok) {
+        const body = await res.text();
         console.log(`[ClawMeeting] sessions_send 成功 → ${sk}`);
+        if (body) console.log(`[ClawMeeting] sessions_send response: ${body.substring(0, 200)}`);
         return { ok: true };
       } else {
         const body = await res.text();
@@ -305,14 +307,23 @@ export default function register(api: any) {
   let pendingNotifications: string[] = [];
 
   // ============================================================
-  // 8. 构建通知消息
+  // 8. 通知构建
   // ============================================================
-  /** 构建通知：服务端 message 字段已包含完整格式化文本（含会议链接），直接使用 */
-  function buildNotification(t: any): string {
-    const serverMessage = t.message ?? "";
-    if (serverMessage) return `[ClawMeeting ${t.task_type}]\n${serverMessage}`;
-    // fallback: 无 message 时用基本信息
-    return `[ClawMeeting ${t.task_type ?? ""}] Meeting: "${t.title ?? "未知会议"}"`;
+
+  /** 给主 session agent 的通知（带类型标记 + 指令，agent 看到后完整转告用户） */
+  function buildAgentNotification(t: any): string {
+    const msg = t.message ?? "";
+    return [
+      `[ClawMeeting ${t.task_type}]`,
+      msg,
+      "",
+      "请将以上会议通知的完整信息转告用户，包括所有细节（会议名称、时间、时长、会议链接等），不要省略任何信息。",
+    ].join("\n");
+  }
+
+  /** 给渠道直推的用户可读文本（服务端 message 已格式化好） */
+  function buildChannelNotification(t: any): string {
+    return t.message || `会议「${t.title ?? ""}」状态更新: ${t.task_type}`;
   }
 
   // ============================================================
@@ -322,7 +333,10 @@ export default function register(api: any) {
   // ============================================================
   async function autoRespondToTasks(tasks: unknown[]): Promise<string[]> {
     const userMessages: string[] = [];
-    const notifications: string[] = []; // 收集本轮所有通知，最后批量发送
+    // 双轨收集：agent 用（带指令）+ 渠道用（纯文本）
+    const agentNotifications: string[] = [];
+    const channelNotifications: string[] = [];
+    const silentMeetingIds: string[] = []; // INITIAL_SUBMIT 的 meeting_id，失败时回滚
 
     for (const task of tasks) {
       const t = task as any;
@@ -330,13 +344,13 @@ export default function register(api: any) {
       const title = t.title ?? "未知会议";
       const taskType = t.task_type;
 
-      // ---- INITIAL_SUBMIT：通知 Agent，由 Agent 根据记忆和日历处理 ----
+      // ---- INITIAL_SUBMIT：仅推主 session，agent 静默处理 ----
       if (taskType === "INITIAL_SUBMIT") {
         if (submittedMeetings.has(meetingId)) continue;
         if (pendingDecisions.has(meetingId)) continue;
 
         submittedMeetings.add(meetingId);
-        // 注意：不加入 pendingDecisions，否则后续 COUNTER_PROPOSAL 会被去重跳过
+        silentMeetingIds.push(meetingId);
 
         const notifyLines = [
           `[ClawMeeting Meeting Invitation]`,
@@ -345,81 +359,58 @@ export default function register(api: any) {
           `Organizer: ${t.initiator ?? "unknown"}`,
           `Duration: ${t.duration_minutes ?? "unknown"} minutes`,
         ];
+        if (t.message) notifyLines.push("", t.message);
 
-        // Fetch meeting detail to include initiator's submitted time slots
+        // 拉取详情补充发起人的已提交时段
         try {
           const detail = await apiClient.getMeetingDetail(meetingId);
-          const submittedParticipants = detail.participants.filter(
+          const submitted = detail.participants.filter(
             (p: any) => p.has_submitted && p.latest_slots?.length > 0,
           );
-          if (submittedParticipants.length > 0) {
+          if (submitted.length > 0) {
             notifyLines.push("", "Submitted available slots:");
-            for (const p of submittedParticipants) {
+            for (const p of submitted) {
               notifyLines.push(`  ${p.email} (${p.role}): ${p.latest_slots.join(", ")}`);
             }
           }
-        } catch (_e) {
-          // Ignore detail fetch failures, continue with basic info
-        }
+        } catch (_e) { /* ignore */ }
 
-        notifications.push(notifyLines.join("\n"));
-        console.log(
-          `[ClawMeeting] 会议「${title}」(${meetingId}) 通知 Agent 处理`,
-        );
+        agentNotifications.push(notifyLines.join("\n"));
+        // INITIAL_SUBMIT 不推渠道
+        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 通知 Agent 处理`);
         continue;
       }
 
-      // ---- COUNTER_PROPOSAL：通知用户，等待决策 ----
+      // ---- COUNTER_PROPOSAL：需要用户决策 ----
       if (taskType === "COUNTER_PROPOSAL") {
-        // 已通知过且在等待用户回复，跳过
         if (pendingDecisions.has(meetingId)) continue;
-
-        // 标记为等待用户决策
         pendingDecisions.add(meetingId);
         savePendingDecisions([...pendingDecisions]);
 
-        const roundCount = t.round_count ?? 0;
-        const coordinatorMessage = t.message ?? "协调方发来了协商建议。";
-
-        const notifyLines = [
-          `[ClawMeeting COUNTER_PROPOSAL]`,
-          `Meeting: "${title}"`,
-          `Negotiation round: ${roundCount}`,
-          `${coordinatorMessage}`,
-        ];
-        notifications.push(notifyLines.join("\n"));
-
-        console.log(
-          `[ClawMeeting] 会议「${title}」(${meetingId}) 第${roundCount}轮协商，已通知用户等待决策`,
-        );
+        agentNotifications.push(buildAgentNotification(t));
+        channelNotifications.push(buildChannelNotification(t));
+        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 第${t.round_count ?? 0}轮协商，通知用户`);
         continue;
       }
 
-      // ---- MEETING_FAILED：需要发起人决策（取消 or 重新发起）----
+      // ---- MEETING_FAILED：需要发起人决策 ----
       if (taskType === "MEETING_FAILED") {
         if (pendingDecisions.has(meetingId)) continue;
-
         pendingDecisions.add(meetingId);
         savePendingDecisions([...pendingDecisions]);
 
-        const notifyLines = [
-          `[ClawMeeting MEETING_FAILED]`,
-          `Meeting: "${title}"`,
-          `${t.message ?? "Meeting negotiation failed."}`,
-        ];
-        notifications.push(notifyLines.join("\n"));
-        console.log(
-          `[ClawMeeting] 会议「${title}」(${meetingId}) 协商失败，等待发起人决策`,
-        );
+        agentNotifications.push(buildAgentNotification(t));
+        channelNotifications.push(buildChannelNotification(t));
+        console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 协商失败，通知用户`);
         continue;
       }
 
-      // ---- 其它类型（CONFIRMED/OVER 等）：纯通知，展示 message 内容 ----
+      // ---- CONFIRMED / OVER 等：纯通知 ----
       if (notifiedMeetings.has(meetingId)) continue;
       notifiedMeetings.add(meetingId);
 
-      // 服务端 message 字段已包含完整格式化文本（含时间、时长、会议链接）
-      notifications.push(buildNotification(t));
+      agentNotifications.push(buildAgentNotification(t));
+      channelNotifications.push(buildChannelNotification(t));
       console.log(`[ClawMeeting] 会议「${title}」(${meetingId}) 通知 type=${taskType}`);
     }
 
@@ -435,49 +426,43 @@ export default function register(api: any) {
       saveNotifiedMeetings([...notifiedMeetings]);
     }
 
-    // ==== 推送策略 ====
-    // 所有通知 sessions_send 到主 session + 每个额外渠道 session
-    // agent 在每个 session 里自然处理并回复，用户在任何渠道都能看到 agent 的回复
-    // INITIAL_SUBMIT 仅推主 session（agent 需要调用工具提交时段，不应重复执行）
+    // ==== 推送 ====
+    // Phase A: 主 session — sessions_send 所有通知（agent 处理并回复用户）
+    // Phase B: 渠道 — sendViaMessageTool 直推用户可见通知（t.message 已格式化）
 
-    const silentMeetingIds: string[] = [];
-    for (const n of notifications) {
-      if (n.includes("[ClawMeeting Meeting Invitation]")) {
-        const idMatch = n.match(/Meeting ID: (mtg_\w+)/);
-        if (idMatch) silentMeetingIds.push(idMatch[1]);
-      }
-    }
+    if (agentNotifications.length === 0) return userMessages;
 
-    if (notifications.length === 0) return userMessages;
-
-    const batchMsg = notifications.join("\n\n---\n\n");
-    console.log(`[ClawMeeting] 推送 ${notifications.length} 条通知到主 session + ${extraChannels.size} 个额外渠道`);
-
-    // ---- 主 session ----
+    // ---- Phase A: 主 session ----
+    const batchMsg = agentNotifications.join("\n\n---\n\n");
+    console.log(`[ClawMeeting] 推送 ${agentNotifications.length} 条通知到主 session`);
     const { ok: mainOk } = await sendViaSessionsSend(batchMsg);
     if (!mainOk) {
-      // 主 session 失败：INITIAL_SUBMIT 回滚让下次重试，其他放入 pendingNotifications
+      // INITIAL_SUBMIT 回滚，让下次轮询重试
       for (const mid of silentMeetingIds) {
         submittedMeetings.delete(mid);
       }
       if (silentMeetingIds.length > 0) {
         console.log(`[ClawMeeting] 主 session 推送失败，已回滚 ${silentMeetingIds.length} 个 submittedMeetings`);
       }
-      userMessages.push(...notifications.filter(n => !n.includes("[ClawMeeting Meeting Invitation]")));
+      // 用户可见通知放入 pendingNotifications 兜底
+      if (channelNotifications.length > 0) {
+        userMessages.push(...channelNotifications);
+      }
     }
 
-    // ---- 额外渠道：仅推用户可见通知（排除 INITIAL_SUBMIT）----
-    // INITIAL_SUBMIT 需要 agent 调用工具提交时段，多个 session 同时执行会重复提交
-    const userVisibleNotifications = notifications.filter(n => !n.includes("[ClawMeeting Meeting Invitation]"));
-    if (userVisibleNotifications.length > 0) {
-      const userMsg = userVisibleNotifications.join("\n\n---\n\n");
+    // ---- Phase B: 渠道直推（仅用户可见通知）----
+    if (channelNotifications.length > 0) {
+      const channelMsg = channelNotifications.join("\n\n---\n\n");
       const mainChannel = parseChannelFromSessionKey(sessionCtx.sessionKey);
       for (const [channelName, ctx] of extraChannels) {
         if (mainChannel && mainChannel.channel === channelName) continue;
-        // sessions_send 到渠道 session，让 agent 在那个 session 里处理并回复
-        sendViaSessionsSend(userMsg, ctx.sessionKey).catch(err =>
-          console.log(`[ClawMeeting] ${channelName} session 推送异常: ${err}`),
-        );
+        const parsed = parseChannelFromSessionKey(ctx.sessionKey);
+        if (!parsed) {
+          console.log(`[ClawMeeting] 跳过 ${channelName}（sessionKey 解析失败）`);
+          continue;
+        }
+        const sent = await sendViaMessageTool(parsed.channel, parsed.target, channelMsg);
+        console.log(`[ClawMeeting] ${channelName} 渠道推送: ${sent ? "成功" : "失败"}`);
       }
     }
 
@@ -760,16 +745,20 @@ export default function register(api: any) {
             "  Step 3: Combine calendar data (if available) and memory clues with the organizer's proposed time slots to select suitable times and submit.",
             "  Only if the user has NO connected calendar AND your memory contains NO schedule info at all, ask the user for their availability.",
             "  Do not skip the calendar check. Do not ask the user if you already have enough info from calendar + memory.",
-            "- On [ClawMeeting Negotiation Update]: the coordinator has sent a compromise proposal.",
-            "  Present the proposal to the user and ask them to choose:",
-            "  1. Accept → call check_and_respond_tasks with response_type='ACCEPT_PROPOSAL'",
-            "  2. Propose new times → user provides times, you parse and call response_type='NEW_PROPOSAL' + available_slots",
-            "  3. Reject → call response_type='REJECT' (records rejection, does not immediately terminate the meeting)",
-            "- On [ClawMeeting Negotiation Failed]: inform the user (organizer) of the failure details and ask:",
-            "  1. Cancel the meeting → call check_and_respond_tasks with response_type='REJECT'",
-            "  2. Retry with adjusted times → user provides new times, call response_type='NEW_PROPOSAL' + available_slots",
-            "- On [ClawMeeting Notification] (confirmation, cancellation, etc.):",
-            "  Relay the notification content to the user in natural language.",
+            "- On [ClawMeeting COUNTER_PROPOSAL]:",
+            "  这是协商建议通知。完整展示协调方的建议内容，并询问用户：",
+            "  1. 接受 → call check_and_respond_tasks with response_type='ACCEPT_PROPOSAL'",
+            "  2. 提出新时段 → 用户提供时段，call response_type='NEW_PROPOSAL' + available_slots",
+            "  3. 拒绝 → call response_type='REJECT'",
+            "- On [ClawMeeting MEETING_FAILED]:",
+            "  这是协商失败通知。完整展示失败原因，并询问用户：",
+            "  1. 取消会议 → call check_and_respond_tasks with response_type='REJECT'",
+            "  2. 调整时间重试 → 用户提供新时段，call response_type='NEW_PROPOSAL' + available_slots",
+            "- On [ClawMeeting MEETING_CONFIRMED]:",
+            "  这是会议确认通知。请将通知中的所有信息完整展示给用户：",
+            "  会议名称、确认时间、时长、会议链接（如有）。不要省略任何细节，不要简化。",
+            "- On [ClawMeeting MEETING_OVER]:",
+            "  这是会议取消通知。告知用户会议已被取消，展示会议名称和原因。",
           ].join("\n")
         : [
             "[ClawMeeting Assistant - Setup Required]",
