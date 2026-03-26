@@ -155,19 +155,20 @@ api.registerCli?.((cliCtx: { program: any }) => {
 2. **submittedMeetings**（内存）— 已提交 INITIAL_SUBMIT 的会议，防止轮询重复推送
 3. **pendingDecisions**（磁盘持久化）— 等待用户决策的会议（COUNTER_PROPOSAL/FAILED），决策前不重复通知
 
-### 通知投递（分流策略）
-当前实现采用分流推送：
-- **INITIAL_SUBMIT**（需要 Agent 处理） → `sessions_send` 触发 agent turn（静默，用户不可见）
-- **COUNTER_PROPOSAL / MEETING_FAILED**（需要用户决策） → `message tool` 直接发 + `prependContext` 让 Agent 下次处理
-- **CONFIRMED / OVER 等**（纯通知） → `message tool` 直接发给用户
-- **message tool** 仅在正式渠道（Telegram/Discord/Feishu）可用，webchat 不支持 → fallback 到 `sessions_send`
-- **pendingNotifications**（兜底）— 推送失败时暂存，下次 `before_prompt_build` 注入 prependContext
+### 通知投递（统一流程：sessions_send → 提取 reply → message tool 分发）
+所有类型的通知走同一路径：
+1. **sessions_send** 到主 session（`agent:main:main`）→ 触发 agent turn，agent 处理通知并回复
+2. **提取 reply** — 从 `sessions_send` 的 HTTP response 中提取 `result.details.reply`（agent 的完整回复文本）
+3. **message tool 分发** — 将 reply 推送到所有额外渠道（Telegram/飞书/Discord），用户看到的是 agent 格式化后的友好文本
+4. **fallback** — 如果 reply 为空（超时等），推送 `buildDirectNotification` 格式化文本；如果 sessions_send 完全失败，加入 `pendingNotifications` 等 `before_prompt_build` 注入
 
-### 推送渠道解析（多渠道叠加）
-- `parseChannelFromSessionKey(sk)` 从任意 sessionKey 解析 channel 和 target
+**message tool** 仅在正式渠道（Telegram/飞书/Discord）可用，webchat 不支持。webchat 用户通过 sessions_send 触发的 agent turn 直接看到回复。
+
+### 推送渠道解析
+- `parseChannelTarget(sk)` 从任意 sessionKey 解析 channel 和 target
 - sessionKey 格式: `"agent:<agentId>:<channel>:<kind>:<id>"`，kind 支持 group/channel/dm/direct
 - webchat/main sessionKey 返回 null（不支持 message tool）
-- 推送时：主 session (sessions_send) 永远推 + 所有已发现的额外渠道 (message tool) 叠加推
+- message tool 参数: `{ tool: "message", args: { action: "send", channel, target, message } }`
 
 ### 多渠道自动发现
 - **启动时**：遍历 `api.config.channels`，找 `enabled: true` 的渠道，读 `~/.openclaw/credentials/{channel}-default-allowFrom.json` 自动发现推送目标
@@ -210,32 +211,32 @@ COLLECTING → ANALYZING → CONFIRMED
 ## 开发环境配置
 
 - **测试服务端地址**: `http://39.105.143.2:7010`（开发阶段）
-- **符号链接**: `C:\Users\jushi\.openclaw\extensions\clawmeeting` → `D:\lll\pl\openclaw-plugins\clawmeeting`
-- **开发工作流**: 改代码 → 重启网关 → 直接测试（无需手动迁移）
-- **openclaw.json 配置**: 已加 `plugins.allow: ["clawmeeting"]` 和 `plugins.load.paths`
-- **测试账号**: `2226957164@qq.com`（user_id: 1）
+- **插件加载**: `plugins.load.paths: ["D:\\lll\\pl\\openclaw-plugins\\clawmeeting"]`（直接加载本地代码）
+- **开发工作流**: 改代码 → 重启网关 → 直接测试
+- **openclaw.json 配置**: `plugins.allow: ["clawmeeting"]` + `plugins.load.paths`
+- **测试账号**:
+
+| 邮箱 | Token | User ID |
+|------|-------|---------|
+| `uppxxcco@gmail.com` | `sk-E4AmW5PU...` | 1 |
+| `runfengsun@gmail.com` | `sk-suVLlfRb...` | 3 |
+| `2226957164@qq.com` | `sk-mSOMouL1...` | 6 |
 
 ## 当前开发进度
 
 ### 已完成
 
-1. **邮箱绑定改造为两步验证码流程**（拆分两个 Tool）
-   - `bind_identity` → `POST /api/auth/send-code`（发送验证码）
-   - `verify_email_code`（新增） → `POST /api/auth/verify-bind`（校验验证码完成绑定）
-   - 旧接口 `POST /api/auth/bind` 保留但标记 Deprecated
-   - 变更文件: `api-client.ts`, `types/index.ts`, `bind-identity.ts`, `verify-email-code.ts`(新建), `index.ts`
-   - curl 接口测试已通过
+1. **邮箱绑定两步验证码流程** — `bind_identity`(发送验证码) + `verify_email_code`(校验+绑定)
+2. **推送架构重构** — sessions_send → 提取 reply → message tool 分发到所有渠道
+3. **多渠道泛化** — `extraChannels: Map<string, SessionContext>`，新增渠道零改动
+4. **sessions_send response 解析** — 检测 forbidden 状态 + 提取 agent reply
+5. **去重防护** — 三层去重 + submittedMeetings 不回滚（防超时导致重复）+ 主 session 脏数据校验
+6. **Debug 日志** — 统一 `[CM:模块]` 前缀，覆盖 API/轮询/推送/工具/钩子/存储
 
-2. **合入远程仓库改动**
-   - 时间格式约束 `00:00-23:59, never use 24:00`（`check-and-respond-tasks.ts`, `initiate-meeting.ts`）
-   - `notifiedMeetings` 上限 200 条，超过时清除最早一半（`index.ts`）
-   - 推送策略重构：`getDirectMessageChannel()` 从 sessionKey 解析渠道，message tool 直发 + sessions_send fallback 分流
-   - 邮件服务切换到 Loops.so API（api-server 侧）
-   - 防止重复通知 + COLLECTING 状态机卡死修复
+### 待优化
 
-### 待测试
-
-- 通过 OpenClaw Agent 实际调用 `bind_identity` + `verify_email_code` 完成邮箱绑定全流程
+- webchat 推送 UX（sessions_send 的系统消息气泡仍可见，等 OpenClaw 开放 `chat.inject` 给插件）
+- 飞书渠道实测（代码已支持，待配置飞书 Bot 验证）
 
 ---
 
@@ -299,11 +300,12 @@ api.runtime.system.requestHeartbeatNow({ reason: "clawmeeting-notification" });
 
 ### 当前状态与后续方向
 
-**当前方案**（已在用）：多渠道叠加推送
-- 主 session: `sessions_send` + `role: "system"` + `announce: false` + `delivery.mode: "none"`
-- 额外渠道（Telegram 等）: `message tool` 直发，不经过 LLM
+**当前方案**（已在用）：sessions_send → reply 提取 → message tool 分发
+- 主 session: `sessions_send` + `role: "system"` + `announce: false` + `delivery.mode: "none"` → 从 response 提取 `reply`
+- 额外渠道: `message tool`（`action: "send"`）推送 agent reply（或 fallback 到 `buildDirectNotification`）
 - 启动时自动从 `api.config.channels` + pairing allow store 发现推送目标
 - 运行时 `before_prompt_build` 持续捕获新渠道 session
+- `sessions_send` 到非 webchat session → **forbidden**（`visibility=tree`），因此额外渠道只能用 message tool
 
 **待确认**（需向 OpenClaw 官方咨询）：
 - 插件 SDK 是否会新增 `api.runtime.chat.inject()` 或等价方法？
