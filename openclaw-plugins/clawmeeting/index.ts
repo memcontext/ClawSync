@@ -25,8 +25,8 @@ import {
   saveNotifiedMeetings,
   loadPendingDecisions,
   savePendingDecisions,
-  saveTelegramCtx,
-  loadTelegramCtx,
+  saveChannelCtx,
+  loadAllChannelCtx,
 } from "./src/utils/storage.js";
 import { PollingManager } from "./src/utils/polling-manager.js";
 
@@ -92,7 +92,7 @@ export default function register(api: any) {
     ...DEFAULT_CONFIG,
     ...(api.config?.plugins?.entries?.[PLUGIN_ID]?.config ?? {}),
   };
-  console.log(`[${PLUGIN_ID}] 插件配置: serverUrl=${pluginConfig.serverUrl}`);
+  console.log(`[CM:init] 插件配置: serverUrl=${pluginConfig.serverUrl}, pollingInterval=${pluginConfig.pollingIntervalMs}ms, autoRespond=${pluginConfig.autoRespond}`);
 
   // 初始化存储目录
   initStorage(PLUGIN_ID);
@@ -105,43 +105,64 @@ export default function register(api: any) {
   const savedCreds = loadCredentials();
   if (savedCreds?.token) {
     apiClient.setToken(savedCreds.token);
-    console.log(`[ClawMeeting] 已恢复身份凭证: ${savedCreds.email} (user_id: ${savedCreds.user_id})`);
+    console.log(`[CM:init] 已恢复身份凭证: email=${savedCreds.email}, user_id=${savedCreds.user_id}, token=${savedCreds.token?.substring(0, 12)}...`);
+  } else {
+    console.log(`[CM:init] 无已保存的身份凭证`);
   }
 
   // ============================================================
-  // 3. Session 管理（主 session + Telegram session 同等地位）
+  // 3. Session 管理（主 session + 额外渠道 session）
   // ============================================================
   const WEBCHAT_CHANNELS = new Set(["webchat", "web", "main"]);
 
-  // 主 session（webchat）
+  // 主 session（webchat）— 校验：sessionKey 不能是渠道 session（防止历史脏数据）
   let sessionCtx: SessionContext = loadSession() ?? { sessionKey: "agent:main:main" };
-  console.log(`[ClawMeeting] 主 session: ${sessionCtx.sessionKey}`);
+  if (sessionCtx.sessionKey.split(":").length >= 5 && !WEBCHAT_CHANNELS.has(sessionCtx.sessionKey.split(":")[2])) {
+    console.log(`[CM:init] 主 session 脏数据检测: ${sessionCtx.sessionKey} 是渠道 session，重置为 agent:main:main`);
+    sessionCtx = { sessionKey: "agent:main:main", channel: "webchat" };
+    saveSession(sessionCtx);
+  }
+  console.log(`[CM:init] 主 session: key=${sessionCtx.sessionKey}, channel=${sessionCtx.channel ?? "未知"}`);
 
-  // Telegram session（同等地位，同样的捕获/恢复/持久化逻辑）
-  let telegramCtx: SessionContext | null = loadTelegramCtx();
-  if (telegramCtx) {
-    console.log(`[ClawMeeting] Telegram session: ${telegramCtx.sessionKey}`);
+  // 额外渠道 session（Telegram/飞书/Discord 等，通用 Map，新渠道零改动）
+  const extraChannels: Map<string, SessionContext> = loadAllChannelCtx();
+  if (extraChannels.size > 0) {
+    for (const [ch, ctx] of extraChannels) {
+      console.log(`[CM:init] 渠道 ${ch} session (从磁盘恢复): key=${ctx.sessionKey}`);
+    }
   }
 
-  // Telegram 自动发现：从 pairing allow store 读取
-  if (!telegramCtx) {
+  // 渠道自动发现：遍历 api.config.channels，从 pairing allow store 读取
+  const configuredChannels = api.config?.channels ?? {};
+  for (const [channelName, channelCfg] of Object.entries(configuredChannels)) {
+    if (!(channelCfg as any)?.enabled) continue;
+    if (WEBCHAT_CHANNELS.has(channelName)) continue;
+    if (extraChannels.has(channelName)) continue; // 已从磁盘恢复
+
     try {
-      const allowStorePath = join(homedir(), ".openclaw", "credentials", "telegram-default-allowFrom.json");
+      const allowStorePath = join(homedir(), ".openclaw", "credentials", `${channelName}-default-allowFrom.json`);
       if (existsSync(allowStorePath)) {
         const storeData = JSON.parse(readFileSync(allowStorePath, "utf-8"));
         const allowFrom: string[] = storeData?.allowFrom ?? [];
         if (allowFrom.length > 0) {
-          telegramCtx = {
-            sessionKey: `agent:main:telegram:direct:${allowFrom[0]}`,
-            channel: "telegram",
+          const ctx: SessionContext = {
+            sessionKey: `agent:main:${channelName}:direct:${allowFrom[0]}`,
+            channel: channelName,
           };
-          saveTelegramCtx(telegramCtx);
-          console.log(`[ClawMeeting] Telegram 自动发现: ${allowFrom[0]} (from pairing allow store)`);
+          extraChannels.set(channelName, ctx);
+          saveChannelCtx(channelName, ctx);
+          console.log(`[CM:init] ${channelName} 自动发现: target=${allowFrom[0]}, sessionKey=${ctx.sessionKey}`);
         }
       }
     } catch (err) {
-      console.log(`[ClawMeeting] 读取 Telegram allow store 失败: ${err}`);
+      console.log(`[CM:init] 读取 ${channelName} allow store 失败: ${err}`);
     }
+  }
+
+  if (extraChannels.size === 0) {
+    console.log(`[CM:init] 无额外渠道（Telegram/飞书等未配置或未配对）`);
+  } else {
+    console.log(`[CM:init] 已发现 ${extraChannels.size} 个额外渠道: [${[...extraChannels.keys()].join(", ")}]`);
   }
 
   // ============================================================
@@ -153,9 +174,9 @@ export default function register(api: any) {
     ?? null;
 
   if (gatewayToken) {
-    console.log("[ClawMeeting] 已获取 gateway token，支持主动推送通知");
+    console.log(`[CM:init] gateway: port=${gatewayPort}, token=${gatewayToken.substring(0, 12)}... → 主动推送可用`);
   } else {
-    console.log("[ClawMeeting] 未获取 gateway token，通知将在用户下次交互时展示");
+    console.log(`[CM:init] gateway: port=${gatewayPort}, token=NULL → 主动推送不可用，通知将在用户下次交互时展示`);
   }
 
   // ============================================================
@@ -165,10 +186,13 @@ export default function register(api: any) {
   /**
    * 通过 sessions_send 发送到指定 session，触发 agent turn
    */
-  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean }> {
+  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean; reply?: string }> {
     const sk = sessionKey ?? sessionCtx.sessionKey ?? "agent:main:main";
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 30000); // 30s：lane wait 可能耗时 10-15s
+    const startMs = Date.now();
+
+    console.log(`[CM:push] >>> sessions_send 目标=${sk} 消息长度=${message.length} 消息前100字="${message.substring(0, 100).replace(/\n/g, "\\n")}"`);
 
     try {
       const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
@@ -191,21 +215,94 @@ export default function register(api: any) {
       });
 
       clearTimeout(timeout);
+      const elapsed = Date.now() - startMs;
 
       if (res.ok) {
         const body = await res.text();
-        console.log(`[ClawMeeting] sessions_send 成功 → ${sk}`);
-        if (body) console.log(`[ClawMeeting] sessions_send response: ${body.substring(0, 200)}`);
-        return { ok: true };
+        // 关键：HTTP 200 不代表成功，需要解析 body 检测 forbidden/error
+        const isForbidden = body.includes('"status":"forbidden"') || body.includes('"status": "forbidden"');
+        if (isForbidden) {
+          console.error(`[CM:push] <<< sessions_send forbidden → ${sk} (${elapsed}ms) body=${body.substring(0, 400)}`);
+          return { ok: false };
+        }
+
+        // 提取 agent reply：response 结构为 { ok, result: { details: { reply, status, ... } } }
+        let reply: string | undefined;
+        try {
+          const json = JSON.parse(body);
+          reply = json?.result?.details?.reply ?? undefined;
+        } catch (_e) {
+          // body 不是 JSON 或结构不同，reply 保持 undefined
+        }
+
+        console.log(`[CM:push] <<< sessions_send 成功 → ${sk} (${elapsed}ms) reply=${reply ? `"${reply.substring(0, 150)}..."` : "无"}`);
+        return { ok: true, reply };
       } else {
         const body = await res.text();
-        console.error(`[ClawMeeting] sessions_send 失败 (${sk}): ${res.status} ${body}`);
+        console.error(`[CM:push] <<< sessions_send 失败 → ${sk} (${elapsed}ms) HTTP=${res.status} body=${body.substring(0, 300)}`);
         return { ok: false };
       }
     } catch (err) {
       clearTimeout(timeout);
+      const elapsed = Date.now() - startMs;
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.log(`[ClawMeeting] sessions_send 未完成 (${sk}): ${errMsg}`);
+      console.error(`[CM:push] <<< sessions_send 异常 → ${sk} (${elapsed}ms): ${errMsg}`);
+      return { ok: false };
+    }
+  }
+
+  /**
+   * 从 sessionKey 解析渠道和目标 ID
+   * 格式: "agent:main:telegram:direct:6866253526" → { channel: "telegram", target: "6866253526" }
+   */
+  function parseChannelTarget(sessionKey: string): { channel: string; target: string } | null {
+    const parts = sessionKey.split(":");
+    // agent:main:<channel>:<kind>:<id>
+    if (parts.length >= 5 && parts[2] !== "main" && parts[2] !== "webchat" && parts[2] !== "web") {
+      return { channel: parts[2], target: parts[4] };
+    }
+    return null;
+  }
+
+  /**
+   * 通过 message tool 直接发消息到渠道（Telegram/Discord/Feishu 等）
+   * 不触发 agent turn，用户直接看到消息内容
+   */
+  async function sendViaMessageTool(channel: string, target: string, message: string): Promise<{ ok: boolean }> {
+    const startMs = Date.now();
+    console.log(`[CM:push] >>> message tool 目标=${channel}:${target} 消息长度=${message.length} 摘要="${message.substring(0, 100).replace(/\n/g, "\\n")}"`);
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${gatewayToken}`,
+        },
+        body: JSON.stringify({
+          tool: "message",
+          args: {
+            action: "send",
+            channel,
+            target,
+            message,
+          },
+        }),
+      });
+
+      const elapsed = Date.now() - startMs;
+      const body = await res.text();
+
+      if (res.ok) {
+        console.log(`[CM:push] <<< message tool 成功 → ${channel}:${target} (${elapsed}ms) body=${body.substring(0, 200)}`);
+        return { ok: true };
+      } else {
+        console.error(`[CM:push] <<< message tool 失败 → ${channel}:${target} (${elapsed}ms) HTTP=${res.status} body=${body.substring(0, 300)}`);
+        return { ok: false };
+      }
+    } catch (err) {
+      const elapsed = Date.now() - startMs;
+      console.error(`[CM:push] <<< message tool 异常 → ${channel}:${target} (${elapsed}ms): ${(err as Error)?.message}`);
       return { ok: false };
     }
   }
@@ -215,8 +312,13 @@ export default function register(api: any) {
    * 仅走 sessions_send 触发 agent turn，不推送给用户
    */
   async function pushAgentMessage(message: string): Promise<boolean> {
-    if (!gatewayToken) return false;
+    if (!gatewayToken) {
+      console.log(`[CM:push] pushAgentMessage 跳过: 无 gatewayToken`);
+      return false;
+    }
+    console.log(`[CM:push] pushAgentMessage 开始 → 仅主 session`);
     const { ok } = await sendViaSessionsSend(message);
+    console.log(`[CM:push] pushAgentMessage 结果: ${ok ? "成功" : "失败"}`);
     return ok;
   }
 
@@ -229,12 +331,9 @@ export default function register(api: any) {
   const submittedMeetings = new Set<string>();
   // 等待用户决策的会议（COUNTER_PROPOSAL 已通知用户，等回复）
   const pendingDecisions = new Set<string>(loadPendingDecisions());
-  if (notifiedMeetings.size > 0) {
-    console.log(`[ClawMeeting] 已恢复 ${notifiedMeetings.size} 个已通知会议记录`);
-  }
-  if (pendingDecisions.size > 0) {
-    console.log(`[ClawMeeting] 已恢复 ${pendingDecisions.size} 个等待用户决策的会议`);
-  }
+  console.log(`[CM:dedup] 初始状态: notifiedMeetings=${notifiedMeetings.size}个 [${[...notifiedMeetings].map(id => id.slice(-8)).join(",")}]`);
+  console.log(`[CM:dedup] 初始状态: submittedMeetings=0个 (内存，重启清空)`);
+  console.log(`[CM:dedup] 初始状态: pendingDecisions=${pendingDecisions.size}个 [${[...pendingDecisions].map(id => id.slice(-8)).join(",")}]`);
 
   // ============================================================
   // 7. 待推送通知队列（备用：主动推送失败时 fallback 到 prependContext）
@@ -256,6 +355,27 @@ export default function register(api: any) {
     ].join("\n");
   }
 
+  /** 给用户直接看的通知（不含 agent 指令，用于 message tool 直推到 Telegram 等渠道） */
+  function buildDirectNotification(t: any): string {
+    const title = t.title ?? "未知会议";
+    const msg = t.message ?? "";
+    const taskType = t.task_type;
+
+    if (taskType === "MEETING_CONFIRMED") {
+      return [`✅ 会议确认：「${title}」`, msg].filter(Boolean).join("\n");
+    }
+    if (taskType === "MEETING_OVER") {
+      return [`❌ 会议取消：「${title}」`, msg].filter(Boolean).join("\n");
+    }
+    if (taskType === "COUNTER_PROPOSAL") {
+      return [`🔄 会议协商：「${title}」需要你决策`, msg, "", "请在对话中回复你的决策（接受/提出新时段/拒绝）"].filter(Boolean).join("\n");
+    }
+    if (taskType === "MEETING_FAILED") {
+      return [`❌ 会议协商失败：「${title}」`, msg, "", "请在对话中回复你的决策（取消/调整参数重试）"].filter(Boolean).join("\n");
+    }
+    return [`📅 [${taskType}] ${title}`, msg].filter(Boolean).join("\n");
+  }
+
 
   // ============================================================
   // 9. 自动响应逻辑
@@ -263,9 +383,13 @@ export default function register(api: any) {
   // 避免多个 system event 并发触发多个 agent turn 导致重复
   // ============================================================
   async function autoRespondToTasks(tasks: unknown[]): Promise<string[]> {
+    console.log(`[CM:notify] === autoRespondToTasks 开始，共 ${tasks.length} 个任务 ===`);
+    console.log(`[CM:notify] 当前去重状态: notified=${notifiedMeetings.size}, submitted=${submittedMeetings.size}, pending=${pendingDecisions.size}`);
     const userMessages: string[] = [];
-    const agentNotifications: string[] = [];
-    const silentMeetingIds: string[] = []; // INITIAL_SUBMIT 的 meeting_id，失败时回滚
+
+    // 统一收集：所有通知走同一路径（sessions_send → 提取 reply → message tool 分发）
+    const agentNotifications: string[] = [];         // 给主 session agent 的指令文本
+    const directFallbacks: string[] = [];            // reply 提取失败时的 fallback 文本
 
     for (const task of tasks) {
       const t = task as any;
@@ -273,13 +397,14 @@ export default function register(api: any) {
       const title = t.title ?? "未知会议";
       const taskType = t.task_type;
 
-      // ---- INITIAL_SUBMIT：仅推主 session，agent 静默处理 ----
+      console.log(`[CM:notify] 处理任务: type=${taskType}, meetingId=${meetingId?.slice(-8)}, title="${title}"`);
+
+      // ---- INITIAL_SUBMIT：agent 静默处理 ----
       if (taskType === "INITIAL_SUBMIT") {
-        if (submittedMeetings.has(meetingId)) continue;
-        if (pendingDecisions.has(meetingId)) continue;
+        if (submittedMeetings.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 submittedMeetings`); continue; }
+        if (pendingDecisions.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 pendingDecisions`); continue; }
 
         submittedMeetings.add(meetingId);
-        silentMeetingIds.push(meetingId);
 
         const notifyLines = [
           `[ClawMeeting Meeting Invitation]`,
@@ -305,42 +430,45 @@ export default function register(api: any) {
         } catch (_e) { /* ignore */ }
 
         agentNotifications.push(notifyLines.join("\n"));
-        console.log(`[ClawMeeting] 收集 INITIAL_SUBMIT: 「${title}」(${meetingId}) 消息: ${(t.message ?? "").substring(0, 80)}`);
+        directFallbacks.push(buildDirectNotification(t));
+        console.log(`[CM:notify]   → 收集 INITIAL_SUBMIT: 「${title}」(${meetingId}) 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
         continue;
       }
 
       // ---- COUNTER_PROPOSAL：需要用户决策 ----
       if (taskType === "COUNTER_PROPOSAL") {
-        if (pendingDecisions.has(meetingId)) continue;
+        if (pendingDecisions.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 pendingDecisions`); continue; }
         pendingDecisions.add(meetingId);
         savePendingDecisions([...pendingDecisions]);
 
         agentNotifications.push(buildAgentNotification(t));
-        console.log(`[ClawMeeting] 收集 COUNTER_PROPOSAL: 「${title}」(${meetingId}) round=${t.round_count ?? 0} 消息: ${(t.message ?? "").substring(0, 80)}`);
+        directFallbacks.push(buildDirectNotification(t));
+        console.log(`[CM:notify]   → 收集 COUNTER_PROPOSAL: 「${title}」(${meetingId}) round=${t.round_count ?? 0} 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
         continue;
       }
 
       // ---- MEETING_FAILED：需要发起人决策 ----
       if (taskType === "MEETING_FAILED") {
-        if (pendingDecisions.has(meetingId)) continue;
+        if (pendingDecisions.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 pendingDecisions`); continue; }
         pendingDecisions.add(meetingId);
         savePendingDecisions([...pendingDecisions]);
 
         agentNotifications.push(buildAgentNotification(t));
-        console.log(`[ClawMeeting] 收集 MEETING_FAILED: 「${title}」(${meetingId}) 消息: ${(t.message ?? "").substring(0, 80)}`);
+        directFallbacks.push(buildDirectNotification(t));
+        console.log(`[CM:notify]   → 收集 MEETING_FAILED: 「${title}」(${meetingId}) 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
         continue;
       }
 
       // ---- CONFIRMED / OVER 等：纯通知 ----
-      if (notifiedMeetings.has(meetingId)) continue;
+      if (notifiedMeetings.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 notifiedMeetings`); continue; }
       notifiedMeetings.add(meetingId);
 
       agentNotifications.push(buildAgentNotification(t));
-      console.log(`[ClawMeeting] 收集 ${taskType}: 「${title}」(${meetingId}) 消息: ${(t.message ?? "").substring(0, 80)}`);
+      directFallbacks.push(buildDirectNotification(t));
+      console.log(`[CM:notify]   → 收集 ${taskType}: 「${title}」(${meetingId}) 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
     }
 
     // ==== 先持久化，再推送（确保不会因重启丢失去重状态）====
-    // 限制 notifiedMeetings 大小，超过 200 条时清除最早的一半
     if (notifiedMeetings.size > 200) {
       const arr = [...notifiedMeetings];
       const keep = arr.slice(arr.length - 100);
@@ -351,35 +479,58 @@ export default function register(api: any) {
       saveNotifiedMeetings([...notifiedMeetings]);
     }
 
-    // ==== 推送：sessions_send 到所有 session ====
-    // 主 session + 每个额外渠道 session，agent 在每个 session 独立处理并回复
+    if (agentNotifications.length === 0) {
+      console.log(`[CM:notify] 无新通知需要推送，结束`);
+      return userMessages;
+    }
 
-    if (agentNotifications.length === 0) return userMessages;
-
+    // ==== 统一推送：sessions_send → 提取 reply → message tool 分发 ====
     const batchMsg = agentNotifications.join("\n\n---\n\n");
-    const targets = [`主session(${sessionCtx.sessionKey})`];
-    if (telegramCtx) targets.push(`Telegram(${telegramCtx.sessionKey})`);
-    console.log(`[ClawMeeting] 推送 ${agentNotifications.length} 条通知 → ${targets.join(" + ")}`);
-    console.log(`[ClawMeeting] 推送内容摘要: ${batchMsg.substring(0, 150).replace(/\n/g, " ")}...`);
+    const fallbackMsg = directFallbacks.join("\n\n---\n\n");
 
-    // ---- 主 session ----
-    const { ok: mainOk } = await sendViaSessionsSend(batchMsg);
+    console.log(`[CM:notify] === 开始推送 ${agentNotifications.length} 条通知 ===`);
+    console.log(`[CM:notify] 推送前去重状态: notified=${notifiedMeetings.size}, submitted=${submittedMeetings.size}, pending=${pendingDecisions.size}`);
+
+    // ---- Step 1: sessions_send 到主 session → agent 处理 + 提取 reply ----
+    console.log(`[CM:notify] [Step1] sessions_send → 主 session: ${sessionCtx.sessionKey} (${batchMsg.length}字)`);
+    const { ok: mainOk, reply } = await sendViaSessionsSend(batchMsg);
+
     if (!mainOk) {
-      for (const mid of silentMeetingIds) {
-        submittedMeetings.delete(mid);
-      }
-      if (silentMeetingIds.length > 0) {
-        console.log(`[ClawMeeting] 主 session 推送失败，已回滚 ${silentMeetingIds.length} 个 submittedMeetings`);
-      }
+      console.error(`[CM:notify] 主 session 推送失败，fallback 到 prependContext`);
       userMessages.push(...agentNotifications);
+
+      // 主 session 失败，额外渠道用 fallback 文本直推
+      for (const [chName, chCtx] of extraChannels) {
+        const target = parseChannelTarget(chCtx.sessionKey);
+        if (target) {
+          console.log(`[CM:notify] [Step2-fallback] ${chName} 推送 directFallback`);
+          await sendViaMessageTool(target.channel, target.target, fallbackMsg);
+        }
+      }
+    } else {
+      console.log(`[CM:notify] 主 session 推送成功`);
+
+      // ---- Step 2: 提取 reply → message tool 分发到所有额外渠道 ----
+      if (extraChannels.size > 0) {
+        const channelMsg = reply || fallbackMsg;
+        const source = reply ? "agent reply" : "directFallback";
+
+        for (const [chName, chCtx] of extraChannels) {
+          const target = parseChannelTarget(chCtx.sessionKey);
+          if (target) {
+            console.log(`[CM:notify] [Step2] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
+            const { ok } = await sendViaMessageTool(target.channel, target.target, channelMsg);
+            console.log(`[CM:notify] ${chName} 推送结果: ${ok ? "成功" : "失败"}`);
+          } else {
+            console.error(`[CM:notify] ${chName} sessionKey 解析失败: ${chCtx.sessionKey}`);
+          }
+        }
+      } else {
+        console.log(`[CM:notify] 无额外渠道，跳过 Step2`);
+      }
     }
 
-    // ---- Telegram session ----
-    if (telegramCtx) {
-      const { ok } = await sendViaSessionsSend(batchMsg, telegramCtx.sessionKey);
-      console.log(`[ClawMeeting] Telegram session 推送: ${ok ? "成功" : "失败"}`);
-    }
-
+    console.log(`[CM:notify] === 推送完成 ===`);
     return userMessages;
   }
 
@@ -395,7 +546,7 @@ export default function register(api: any) {
       const taskResults = (result as any).task_results ?? [];
       // 诊断：列出 API 返回的所有任务（含类型和 meeting_id）
       if (taskResults.length > 0) {
-        console.log(`[ClawMeeting] API 返回 ${taskResults.length} 个任务: ${taskResults.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
+        console.log(`[CM:poll] API 返回 ${taskResults.length} 个任务: ${taskResults.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
       }
       const newTasks = taskResults.filter((t: any) => {
         const tt = t.task_type;
@@ -403,32 +554,32 @@ export default function register(api: any) {
         // CONFIRMED/OVER：纯通知去重
         if (tt === "MEETING_CONFIRMED" || tt === "MEETING_OVER") {
           const dup = notifiedMeetings.has(mid);
-          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 notifiedMeetings`);
+          if (dup) console.log(`[CM:dedup] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 notifiedMeetings`);
           return !dup;
         }
         // FAILED：需要发起人决策，用 pendingDecisions 去重
         if (tt === "MEETING_FAILED") {
           const dup = pendingDecisions.has(mid);
-          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 pendingDecisions`);
+          if (dup) console.log(`[CM:dedup] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 pendingDecisions`);
           return !dup;
         }
         // INITIAL_SUBMIT：已提交过的不再重试
         if (tt === "INITIAL_SUBMIT") {
           const dup = submittedMeetings.has(mid);
-          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 submittedMeetings`);
+          if (dup) console.log(`[CM:dedup] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 submittedMeetings`);
           return !dup;
         }
         // COUNTER_PROPOSAL：等待用户决策的不再重复通知
         if (tt === "COUNTER_PROPOSAL") {
           const dup = pendingDecisions.has(mid);
-          if (dup) console.log(`[ClawMeeting] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 pendingDecisions`);
+          if (dup) console.log(`[CM:dedup] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 pendingDecisions`);
           return !dup;
         }
         // 其它未知类型：用 notifiedMeetings 去重，防止重复推送
         return !notifiedMeetings.has(mid);
       });
       if (newTasks.length > 0) {
-        console.log(`[ClawMeeting] 轮询发现 ${newTasks.length} 个新待办任务: ${newTasks.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
+        console.log(`[CM:poll] 轮询发现 ${newTasks.length} 个新待办任务: ${newTasks.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
       }
       return { ...(result as any), task_results: newTasks, pending_count: newTasks.length };
     },
@@ -443,8 +594,10 @@ export default function register(api: any) {
   // 11. 插件加载时：有 Token 立即启动轮询
   // ============================================================
   if (apiClient.getToken()) {
-    console.log("[ClawMeeting] 有已保存的 Token，立即启动轮询。");
+    console.log("[CM:init] 有已保存的 Token，立即启动轮询");
     pollingManager.start();
+  } else {
+    console.log("[CM:init] 无 Token，轮询不启动（等待用户绑定邮箱）");
   }
 
   // ============================================================
@@ -454,12 +607,12 @@ export default function register(api: any) {
     id: "clawmeeting-polling",
     start: (_ctx: any) => {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
-        console.log("[ClawMeeting] Service start: 启动轮询。");
+        console.log("[CM:lifecycle] Service start: 启动轮询。");
         pollingManager.start();
       }
     },
     stop: (_ctx: any) => {
-      console.log("[ClawMeeting] Service stop: 停止轮询。");
+      console.log("[CM:lifecycle] Service stop: 停止轮询。");
       pollingManager.stop();
     },
   });
@@ -471,7 +624,7 @@ export default function register(api: any) {
     "gateway_start",
     () => {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
-        console.log("[ClawMeeting] gateway_start: 启动轮询。");
+        console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
       }
     },
@@ -481,7 +634,7 @@ export default function register(api: any) {
     "gateway_stop",
     () => {
       pollingManager.stop();
-      console.log("[ClawMeeting] gateway_stop: 停止轮询。");
+      console.log("[CM:lifecycle] gateway_stop: 停止轮询。");
     },
   );
 
@@ -492,12 +645,16 @@ export default function register(api: any) {
   api.registerTool({
     ...bindIdentitySchema,
     async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> bind_identity 调用: email=${params.email}`);
+      const startMs = Date.now();
       const handler = createBindIdentityHandler(apiClient, () => {
         if (!pollingManager.isRunning()) {
+          console.log(`[CM:tool] bind_identity → 绑定成功，启动轮询`);
           pollingManager.start();
         }
       });
       const result = await handler(params);
+      console.log(`[CM:tool] <<< bind_identity 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, already_bound=${(result as any).already_bound}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
@@ -505,12 +662,16 @@ export default function register(api: any) {
   api.registerTool({
     ...verifyEmailCodeSchema,
     async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> verify_email_code 调用: email=${params.email}, code=${params.code}`);
+      const startMs = Date.now();
       const handler = createVerifyEmailCodeHandler(apiClient, () => {
         if (!pollingManager.isRunning()) {
+          console.log(`[CM:tool] verify_email_code → 绑定成功，启动轮询`);
           pollingManager.start();
         }
       });
       const result = await handler(params);
+      console.log(`[CM:tool] <<< verify_email_code 完成 (${Date.now() - startMs}ms): success=${(result as any).success}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
@@ -518,8 +679,11 @@ export default function register(api: any) {
   api.registerTool({
     ...initiateMeetingSchema,
     async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> initiate_meeting 调用: title="${params.title}", duration=${params.duration_minutes}min, invitees=[${params.invitees?.join(",")}], slots=${params.available_slots?.length ?? 0}个`);
+      const startMs = Date.now();
       const handler = createInitiateMeetingHandler(apiClient);
       const result = await handler(params);
+      console.log(`[CM:tool] <<< initiate_meeting 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, meeting_id=${(result as any).meeting_id ?? "N/A"}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
@@ -528,19 +692,40 @@ export default function register(api: any) {
   api.registerTool({
     ...checkAndRespondTasksSchema,
     async execute(_id: string, params: any) {
+      const isQuery = !params.meeting_id;
+      if (isQuery) {
+        console.log(`[CM:tool] >>> check_and_respond_tasks 调用 (Mode A: 查询任务列表)`);
+      } else {
+        console.log(`[CM:tool] >>> check_and_respond_tasks 调用 (Mode B: 提交响应) meeting_id=${params.meeting_id?.slice(-8)}, response_type=${params.response_type}, slots=${params.available_slots?.length ?? 0}个`);
+      }
+      const startMs = Date.now();
       const result = await checkHandler(params);
+      const elapsed = Date.now() - startMs;
+
+      if (isQuery) {
+        console.log(`[CM:tool] <<< check_and_respond_tasks 查询完成 (${elapsed}ms): success=${(result as any).success}, pending_count=${(result as any).pending_count ?? 0}`);
+        if ((result as any).task_results?.length) {
+          const tasks = (result as any).task_results;
+          console.log(`[CM:tool]   任务详情: ${tasks.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
+        }
+      } else {
+        console.log(`[CM:tool] <<< check_and_respond_tasks 提交完成 (${elapsed}ms): success=${(result as any).success}, status=${(result as any).status ?? "N/A"}`);
+      }
 
       // 用户通过 Agent 提交了决策 → 清除等待状态，允许后续新轮次
       if (params.meeting_id && params.response_type && (result as any).success) {
         if (pendingDecisions.has(params.meeting_id)) {
           pendingDecisions.delete(params.meeting_id);
           savePendingDecisions([...pendingDecisions]);
-          console.log(`[ClawMeeting] 会议 ${params.meeting_id} 用户已决策，清除等待状态`);
+          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} 用户已决策(${params.response_type})，从 pendingDecisions 移除`);
         }
         // 只在用户主动决策（非首次提交）时清除 submittedMeetings，允许新轮次重新自动提交
         // INITIAL 提交后不清除，否则会议仍在 COLLECTING 状态时轮询会重复推送
         if (params.response_type !== "INITIAL") {
           submittedMeetings.delete(params.meeting_id);
+          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} 从 submittedMeetings 移除（非 INITIAL）`);
+        } else {
+          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} INITIAL 提交成功，保留在 submittedMeetings 中`);
         }
       }
 
@@ -552,7 +737,10 @@ export default function register(api: any) {
   api.registerTool({
     ...listMeetingsSchema,
     async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> list_meetings 调用: meeting_id=${params.meeting_id ?? "(列表模式)"}`);
+      const startMs = Date.now();
       const result = await listHandler(params);
+      console.log(`[CM:tool] <<< list_meetings 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, total=${(result as any).total ?? "N/A"}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
@@ -596,6 +784,8 @@ export default function register(api: any) {
       // SDK: event = { prompt, messages }, ctx = { agentId, sessionKey, sessionId, channelId, ... }
       const sessionKey = ctx?.sessionKey;
       const channel = ctx?.channelId;
+      const agentId = ctx?.agentId;
+      const peerId = ctx?.peerId;
 
       // 判断是否为主 session：排除 cron、subagent、run 等临时 session
       const isMainSession = sessionKey
@@ -603,25 +793,34 @@ export default function register(api: any) {
         && !sessionKey.includes(":run:")
         && !sessionKey.includes(":subagent:");
 
+      console.log(`[CM:hook] before_prompt_build: sessionKey=${sessionKey}, channel=${channel ?? "null"}, agentId=${agentId ?? "null"}, peerId=${peerId ?? "null"}, isMain=${isMainSession}`);
+
       if (isMainSession) {
         // 主 session 捕获（webchat）
         const isWebchat = !channel || WEBCHAT_CHANNELS.has(channel);
         if (isWebchat && (sessionKey !== sessionCtx?.sessionKey || channel !== sessionCtx?.channel)) {
+          const oldKey = sessionCtx.sessionKey;
           sessionCtx = { sessionKey, channel };
           saveSession(sessionCtx);
-          console.log(`[ClawMeeting] 主 session updated: ${sessionKey}`);
+          console.log(`[CM:hook] 主 session 更新: ${oldKey} → ${sessionKey} (channel=${channel ?? "webchat"})`);
         }
 
-        // Telegram session 捕获（同等逻辑）
-        if (channel === "telegram" && (!telegramCtx || telegramCtx.sessionKey !== sessionKey)) {
-          telegramCtx = { sessionKey, channel };
-          saveTelegramCtx(telegramCtx);
-          console.log(`[ClawMeeting] Telegram session updated: ${sessionKey}`);
+        // 额外渠道 session 捕获（通用：Telegram/飞书/Discord 等）
+        if (channel && !WEBCHAT_CHANNELS.has(channel)) {
+          const existing = extraChannels.get(channel);
+          if (!existing || existing.sessionKey !== sessionKey) {
+            const oldKey = existing?.sessionKey ?? "null";
+            const ctx: SessionContext = { sessionKey, channel };
+            extraChannels.set(channel, ctx);
+            saveChannelCtx(channel, ctx);
+            console.log(`[CM:hook] 渠道 ${channel} session 更新: ${oldKey} → ${sessionKey}`);
+          }
         }
       }
 
       // 非主 session 不注入 system prompt，节省 token
       if (!isMainSession) {
+        console.log(`[CM:hook] 非主 session，返回空（不注入 system prompt）`);
         return {};
       }
 
@@ -681,6 +880,7 @@ export default function register(api: any) {
       // 后台轮询推送的通知 → 注入 prependContext，Agent 看到后自然语言转述给用户
       // 用户在 webchat 里不会看到原始通知文本，只看到 Agent 的回复
       if (pendingNotifications.length > 0) {
+        console.log(`[CM:hook] 注入 prependContext: ${pendingNotifications.length} 条待推送通知（fallback 路径）`);
         result.prependContext = [
           "[ClawMeeting Important Notifications]",
           ...pendingNotifications,
@@ -688,10 +888,12 @@ export default function register(api: any) {
         pendingNotifications = [];
       }
 
+      console.log(`[CM:hook] 返回: appendSystemContext=${isBound ? "已绑定模板" : "未绑定模板"}, prependContext=${result.prependContext ? "有" : "无"}`);
       return result;
     },
     { priority: 5 },
   );
 
-  console.log("[ClawMeeting] ClawMeeting Meeting Negotiator 插件已加载。");
+  const channelList = extraChannels.size > 0 ? [...extraChannels.keys()].join(",") : "无";
+  console.log(`[CM:init] ClawMeeting 插件加载完成。session=${sessionCtx.sessionKey}, 额外渠道=[${channelList}], polling=${pollingManager.isRunning() ? "运行中" : "未启动"}, gateway=${gatewayToken ? "可用" : "不可用"}`);
 }

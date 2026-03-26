@@ -34,6 +34,7 @@ function ensureDir() {
 export function saveCredentials(creds: StoredCredentials): void {
   ensureDir();
   writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), "utf-8");
+  console.log(`[CM:store] saveCredentials: email=${creds.email}, user_id=${creds.user_id}, token=${creds.token?.substring(0, 12)}...`);
 }
 
 export function loadCredentials(): StoredCredentials | null {
@@ -79,6 +80,7 @@ export function saveNotifiedMeetings(meetingIds: string[]): void {
   ensureDir();
   const filePath = join(STORAGE_DIR, NOTIFIED_FILE_NAME);
   writeFileSync(filePath, JSON.stringify(meetingIds), "utf-8");
+  console.log(`[CM:store] saveNotifiedMeetings: ${meetingIds.length}个 [${meetingIds.slice(-5).map(id => id.slice(-8)).join(",")}${meetingIds.length > 5 ? "..." : ""}]`);
 }
 
 export function loadNotifiedMeetings(): string[] {
@@ -102,6 +104,7 @@ export function savePendingDecisions(meetingIds: string[]): void {
   ensureDir();
   const filePath = join(STORAGE_DIR, PENDING_DECISIONS_FILE_NAME);
   writeFileSync(filePath, JSON.stringify(meetingIds), "utf-8");
+  console.log(`[CM:store] savePendingDecisions: ${meetingIds.length}个 [${meetingIds.map(id => id.slice(-8)).join(",")}]`);
 }
 
 export function loadPendingDecisions(): string[] {
@@ -121,6 +124,7 @@ export function loadPendingDecisions(): string[] {
 export function saveSession(session: SessionContext): void {
   ensureDir();
   writeFileSync(SESSION_FILE, JSON.stringify(session, null, 2), "utf-8");
+  console.log(`[CM:store] saveSession: key=${session.sessionKey}, channel=${session.channel ?? "未知"}`);
 }
 
 export function loadSession(): SessionContext | null {
@@ -150,6 +154,7 @@ export function saveChannelCtx(channel: string, ctx: SessionContext): void {
   ensureDir();
   const filePath = join(STORAGE_DIR, `channel-${channel}.json`);
   writeFileSync(filePath, JSON.stringify(ctx, null, 2), "utf-8");
+  console.log(`[CM:store] saveChannelCtx: channel=${channel}, key=${ctx.sessionKey}`);
 }
 
 export function loadChannelCtx(channel: string): SessionContext | null {

@@ -56,16 +56,29 @@ export class ClawMeetingApiClient {
       options.body = JSON.stringify(body);
     }
 
-    const res = await fetch(url, options);
-    const json = (await res.json()) as ApiResponse<T>;
+    const startMs = Date.now();
+    console.log(`[CM:api] >>> ${method} ${path}${body ? ` body=${JSON.stringify(body).substring(0, 300)}` : ""}`);
 
-    if (!res.ok || json.code !== 200) {
-      throw new Error(
-        `API Error [${method} ${path}]: ${json.message ?? res.statusText}`,
-      );
+    try {
+      const res = await fetch(url, options);
+      const elapsed = Date.now() - startMs;
+      const json = (await res.json()) as ApiResponse<T>;
+
+      if (!res.ok || json.code !== 200) {
+        console.error(`[CM:api] <<< ${method} ${path} ${res.status} code=${json.code} msg="${json.message}" (${elapsed}ms)`);
+        throw new Error(
+          `API Error [${method} ${path}]: ${json.message ?? res.statusText}`,
+        );
+      }
+
+      console.log(`[CM:api] <<< ${method} ${path} ${res.status} code=${json.code} (${elapsed}ms) data=${JSON.stringify(json.data).substring(0, 200)}`);
+      return json;
+    } catch (err) {
+      const elapsed = Date.now() - startMs;
+      if ((err as Error)?.message?.startsWith("API Error")) throw err;
+      console.error(`[CM:api] <<< ${method} ${path} NETWORK_ERROR (${elapsed}ms): ${(err as Error)?.message}`);
+      throw err;
     }
-
-    return json;
   }
 
   // ============================================================
@@ -73,12 +86,16 @@ export class ClawMeetingApiClient {
   // ============================================================
   async sendVerificationCode(email: string): Promise<{ message: string }> {
     const url = `${this.baseUrl}/api/auth/send-code`;
+    console.log(`[CM:api] >>> POST /api/auth/send-code email=${email}`);
+    const startMs = Date.now();
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email } as SendCodeRequest),
     });
     const json = (await res.json()) as ApiResponse<null>;
+    const elapsed = Date.now() - startMs;
+    console.log(`[CM:api] <<< POST /api/auth/send-code ${res.status} code=${json.code} msg="${json.message}" (${elapsed}ms)`);
 
     // send-code 限频时返回 HTTP 200 但 code=429，验证失败 code=400/500
     // 统一将 message 返回给上层，不抛异常
@@ -90,12 +107,16 @@ export class ClawMeetingApiClient {
   // ============================================================
   async verifyAndBind(email: string, code: string): Promise<{ success: boolean; message: string; data?: BindAuthResponse }> {
     const url = `${this.baseUrl}/api/auth/verify-bind`;
+    console.log(`[CM:api] >>> POST /api/auth/verify-bind email=${email} code=${code}`);
+    const startMs = Date.now();
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, code } as VerifyBindRequest),
     });
     const json = (await res.json()) as ApiResponse<BindAuthResponse>;
+    const elapsed = Date.now() - startMs;
+    console.log(`[CM:api] <<< POST /api/auth/verify-bind ${res.status} code=${json.code} msg="${json.message}" hasToken=${!!json.data?.token} (${elapsed}ms)`);
 
     // verify-bind 验证失败时返回 HTTP 200 但 code=400
     if (json.code !== 200 || !json.data?.token) {

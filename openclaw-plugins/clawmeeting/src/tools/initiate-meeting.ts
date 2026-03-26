@@ -147,7 +147,7 @@ export function createInitiateMeetingHandler(apiClient: ClawMeetingApiClient) {
       }
 
       if (errors.length > 0) {
-        console.log(`[ClawMeeting] initiate_meeting response validation warnings: ${errors.join("; ")}`);
+        console.log(`[CM:tool] initiate_meeting 响应校验警告: ${errors.join("; ")}`);
         return {
           success: false,
           message: `Meeting creation request sent but response validation failed: ${errors.join("; ")}`,

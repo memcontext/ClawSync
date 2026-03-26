@@ -318,7 +318,7 @@ export function createCheckAndRespondTasksHandler(
             try {
               meetingDetail = await apiClient.getMeetingDetail(task.meeting_id);
             } catch (e) {
-              console.log(`[ClawMeeting] Failed to fetch detail, falling back to basic info: ${e}`);
+              console.log(`[CM:tool] check_and_respond_tasks: getMeetingDetail 失败, falling back to basic info: ${e}`);
             }
 
             const info = buildInitialSubmitInfo(task) as any;
@@ -341,7 +341,7 @@ export function createCheckAndRespondTasksHandler(
             try {
               meetingDetail = await apiClient.getMeetingDetail(task.meeting_id);
             } catch (e) {
-              console.log(`[ClawMeeting] Failed to fetch detail, falling back to basic info: ${e}`);
+              console.log(`[CM:tool] check_and_respond_tasks: getMeetingDetail 失败, falling back to basic info: ${e}`);
             }
 
             const info = buildCounterProposalInfo(task) as any;
