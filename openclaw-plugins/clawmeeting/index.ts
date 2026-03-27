@@ -80,7 +80,7 @@ export default function register(api: any) {
   }
   _registered = true;
 
-  const PKG_VERSION = "1.0.28";
+  const PKG_VERSION = "1.0.29";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   const PLUGIN_ID = readPluginId();
@@ -576,13 +576,18 @@ export default function register(api: any) {
             console.log(`[CM:queue] INITIAL_SUBMIT 失败，不推送到用户渠道，等下次轮询重新入队`);
             submittedMeetings.delete(meetingId); // 允许下次轮询重新发现
           } else {
-            // 其他类型推 directMsg 到用户
-            pendingNotifications.push(item.directMsg);
-            for (const [chName, chCtx] of extraChannels) {
-              const target = parseChannelTarget(chCtx.sessionKey);
-              if (target) {
-                await sendViaMessageTool(target.channel, target.target, item.directMsg);
+            // 其他类型：仅当 directMsg 有实质内容时才推送
+            const taskMsg = item.task?.message ?? "";
+            if (taskMsg.trim()) {
+              pendingNotifications.push(item.directMsg);
+              for (const [chName, chCtx] of extraChannels) {
+                const target = parseChannelTarget(chCtx.sessionKey);
+                if (target) {
+                  await sendViaMessageTool(target.channel, target.target, item.directMsg);
+                }
               }
+            } else {
+              console.log(`[CM:queue] t.message 为空，跳过 fallback 推送（避免空壳通知）`);
             }
           }
         } else {
@@ -601,14 +606,18 @@ export default function register(api: any) {
         console.log(`[CM:queue] INITIAL_SUBMIT 静默处理完成（reply=无），不推送到额外渠道`);
       } else if (extraChannels.size > 0) {
         // 其他类型：提取 reply → message tool 分发到额外渠道
-        const channelMsg = reply || item.directMsg;
-        const source = reply ? "agent reply" : "directFallback";
-
-        for (const [chName, chCtx] of extraChannels) {
-          const target = parseChannelTarget(chCtx.sessionKey);
-          if (target) {
-            console.log(`[CM:queue] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
-            await sendViaMessageTool(target.channel, target.target, channelMsg);
+        const taskMsg = item.task?.message ?? "";
+        const channelMsg = reply || (taskMsg.trim() ? item.directMsg : "");
+        if (!channelMsg) {
+          console.log(`[CM:queue] reply=无 且 t.message=空，跳过额外渠道推送`);
+        } else {
+          const source = reply ? "agent reply" : "directFallback";
+          for (const [chName, chCtx] of extraChannels) {
+            const target = parseChannelTarget(chCtx.sessionKey);
+            if (target) {
+              console.log(`[CM:queue] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
+              await sendViaMessageTool(target.channel, target.target, channelMsg);
+            }
           }
         }
       }
