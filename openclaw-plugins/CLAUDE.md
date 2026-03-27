@@ -155,14 +155,16 @@ api.registerCli?.((cliCtx: { program: any }) => {
 2. **submittedMeetings**（内存）— 已提交 INITIAL_SUBMIT 的会议，防止轮询重复推送
 3. **pendingDecisions**（磁盘持久化）— 等待用户决策的会议（COUNTER_PROPOSAL/FAILED），决策前不重复通知
 
-### 通知投递（统一流程：sessions_send → 提取 reply → message tool 分发）
-所有类型的通知走同一路径：
-1. **sessions_send** 到主 session（`agent:main:main`）→ 触发 agent turn，agent 处理通知并回复
-2. **提取 reply** — 从 `sessions_send` 的 HTTP response 中提取 `result.details.reply`（agent 的完整回复文本）
-3. **message tool 分发** — 将 reply 推送到所有额外渠道（Telegram/飞书/Discord），用户看到的是 agent 格式化后的友好文本
-4. **fallback** — 如果 reply 为空（超时等），推送 `buildDirectNotification` 格式化文本；如果 sessions_send 完全失败，加入 `pendingNotifications` 等 `before_prompt_build` 注入
+### 通知投递（任务队列：collectTasks → processQueue）
+轮询发现新任务 → `collectTasks` 去重+入队（毫秒级） → `processQueue`（5s 定时器）逐条处理：
+1. **sessions_send** 到主 session（`agent:main:main`，60s 超时）→ 触发 agent turn
+2. **提取 reply** — 从 response 中提取 `result.details.reply`
+3. **message tool 分发** — 将 reply 推送到所有额外渠道（Telegram/飞书/Discord）
+4. **失败重试** — sessions_send 失败则留在队列，下轮重试（最多 3 次）
+5. **超时放弃** — 3 次失败后用 `buildDirectNotification`（用户友好格式）fallback 到 prependContext + message tool
+6. **Agent Offline** — 入队超 10 分钟未处理 → 自动 `REJECT` + 通知用户
 
-**message tool** 仅在正式渠道（Telegram/飞书/Discord）可用，webchat 不支持。webchat 用户通过 sessions_send 触发的 agent turn 直接看到回复。
+**message tool** 仅在正式渠道可用，webchat 不支持。webchat 用户通过 sessions_send 触发的 agent turn 直接看到回复。
 
 ### 推送渠道解析
 - `parseChannelTarget(sk)` 从任意 sessionKey 解析 channel 和 target
@@ -232,11 +234,21 @@ COLLECTING → ANALYZING → CONFIRMED
 4. **sessions_send response 解析** — 检测 forbidden 状态 + 提取 agent reply
 5. **去重防护** — 三层去重 + submittedMeetings 不回滚（防超时导致重复）+ 主 session 脏数据校验
 6. **Debug 日志** — 统一 `[CM:模块]` 前缀，覆盖 API/轮询/推送/工具/钩子/存储
+7. **任务队列重构** — `collectTasks`(入队) + `processQueue`(逐条处理)，替代旧的 batch `autoRespondToTasks`
+   - 轮询回调只做入队（毫秒级，不阻塞）
+   - 独立 5s 定时器逐条处理：sessions_send → 提取 reply → message tool 分发
+   - 失败重试最多 3 次，fallback 用 `buildDirectNotification`（用户友好格式，不再是原始 agent 指令）
+   - Agent Offline：入队超 10 分钟 → 自动 REJECT + `"Agent offline"` + 通知用户
+   - sessions_send 超时 30s → 60s
+8. **preference_note 必填** — agent 提交时必须带用户偏好/约束说明
+9. **FAILED 重试指令增强** — 明确列出所有可修改参数（时间/时长/参与者）
+10. **GUIDE.md 合并到 SKILL.md** — 去掉重复文档，统一为一个 agent skill 文件
 
 ### 待优化
 
 - webchat 推送 UX（sessions_send 的系统消息气泡仍可见，等 OpenClaw 开放 `chat.inject` 给插件）
 - 飞书渠道实测（代码已支持，待配置飞书 Bot 验证）
+- npm 发布新版（当前 npm 为 1.0.18，本地代码已超前）
 
 ---
 
