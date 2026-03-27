@@ -139,11 +139,14 @@ function buildInitialSubmitInfo(task: PendingTask): object {
       "Step 2: Check your memory for schedule info the user mentioned (business trips, doctor appointments, picking up kids, dinner plans, etc.) and meeting preferences. ",
       "Step 3: If calendar or memory provides schedule info, combine them with the organizer's proposed slots to select suitable times, ",
       "then call this tool to submit: meeting_id, response_type='INITIAL', available_slots, preference_note. ",
+      "【Important】If you handled this entirely by yourself (user was NOT asked), you MUST prefix preference_note with '[auto]'. ",
+      "Example: preference_note='[auto] 根据日历和记忆自动安排，周三下午有空'. ",
       "After successful submission, briefly inform the user: which meeting was received, what times you submitted, and why. ",
       "Step 4: If you have NO connected calendar AND your memory has NO schedule info at all, ",
       "then ask the user for their available times before submitting. ",
       "【Critical】Always fill in preference_note with any scheduling constraints, preferences, or context. ",
-      "Examples: '下午有课，只有上午有空', '出差中，只能线上', '希望尽量短，30分钟就够'. Only fill it when the user expressed something relevant; omit it otherwise.",
+      "If the user provided input directly, do NOT add [auto] prefix. ",
+      "Examples: '下午有课，只有上午有空', '出差中，只能线上'. Only fill it when relevant; omit it otherwise.",
     ].join(""),
   };
 }

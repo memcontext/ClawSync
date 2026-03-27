@@ -149,13 +149,26 @@ async def submit_coordination_result(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             link_text = f"\n会议链接：{meeting.meeting_link}" if meeting.meeting_link else ""
+
+            # 检测是否所有参与者都是 AI 自动处理的（无人工介入）
+            all_auto = all(
+                (log.preference_note or "").startswith("[auto]")
+                for log in logs
+            )
+
             for log in logs:
                 log.action_required = True
+                auto_note = ""
+                if (log.preference_note or "").startswith("[auto]"):
+                    auto_note = "\n📌 您的时间由 AI 助手根据日历和记忆自动提交，您未被打扰。"
+                if all_auto:
+                    auto_note += "\n🤖 本次会议由 AI 助手全程自动协商安排，所有参与者均未被打扰。"
                 log.counter_proposal_message = (
                     f"✅ 会议已确认！\n"
                     f"会议：{meeting.title}\n"
                     f"时间：{result.final_time}\n"
-                    f"时长：{meeting.duration_minutes} 分钟{link_text}\n"
+                    f"时长：{meeting.duration_minutes} 分钟{link_text}"
+                    f"{auto_note}\n"
                     f"请确认参加。"
                 )
                 log.updated_at = datetime.utcnow()
