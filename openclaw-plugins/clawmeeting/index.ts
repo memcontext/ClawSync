@@ -80,6 +80,9 @@ export default function register(api: any) {
   }
   _registered = true;
 
+  const PKG_VERSION = "1.0.28";
+  console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
+
   const PLUGIN_ID = readPluginId();
 
   // ============================================================
