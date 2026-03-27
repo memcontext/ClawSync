@@ -590,9 +590,9 @@ export default function register(api: any) {
       taskQueue.shift();
       console.log(`[CM:queue] sessions_send 成功`);
 
-      // INITIAL_SUBMIT 是 agent 静默处理，不推到额外渠道（用户不需要看到中间状态）
-      if (taskType === "INITIAL_SUBMIT") {
-        console.log(`[CM:queue] INITIAL_SUBMIT 静默处理完成，不推送到额外渠道`);
+      // INITIAL_SUBMIT：有 reply 说明 agent 需要用户决策（如冲突），推到额外渠道；无 reply 说明静默处理完成，不推
+      if (taskType === "INITIAL_SUBMIT" && !reply) {
+        console.log(`[CM:queue] INITIAL_SUBMIT 静默处理完成（reply=无），不推送到额外渠道`);
       } else if (extraChannels.size > 0) {
         // 其他类型：提取 reply → message tool 分发到额外渠道
         const channelMsg = reply || item.directMsg;
