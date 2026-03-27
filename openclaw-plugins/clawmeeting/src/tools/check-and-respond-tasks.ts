@@ -191,6 +191,7 @@ function buildCounterProposalInfo(task: PendingTask): object {
       "  - Accept: preference_note='下午2点最方便' ",
       "  - New proposal: preference_note='周三有课，只能周四' ",
       "  - Reject: preference_note='这周出差，无法参加' ",
+      "  - Reject with delegate: preference_note='无法参加，建议让 xxx@example.com 代替我参加' ",
       "  - ANY structural suggestion: preference_note='时间太长了，建议改成30分钟' or '建议把小王也加上' ",
       "This field is critical for the coordinator agent to understand everyone's real constraints. Only fill it when the user expressed something relevant; omit it if the user has no additional context. ",
       "Reply in the user's language (detect from conversation history).",
