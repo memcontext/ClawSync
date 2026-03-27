@@ -1,15 +1,12 @@
 // ============================================================
 // ClawMeeting Plugin - 入口文件
 // 架构设计：
-//   1. 插件加载时：恢复 Token → 有 Token 则立即启动轮询
-//   2. 各状态处理：
-//      COLLECTING    → 通知 Agent，由 Agent 根据记忆和日历提交空闲时间
-//      ANALYZING     → 跳过（等服务端分析完）
-//      NEGOTIATING   → 通知 Agent 处理协商
-//      CONFIRMED     → 主动推送通知给用户（含完整会议信息 + 虚拟会议号）
-//      FAILED        → 主动推送通知给用户
-//   3. 通知去重：持久化已通知 meeting_id
-//   4. 主动推送：通过 gateway HTTP API 的 sessions_send 触发 agent 回合
+//   1. 插件加载时：恢复 Token → 有 Token 则立即启动轮询 + 队列处理器
+//   2. 轮询（10s）：发现新任务 → 去重 → 入队（collectTasks，毫秒级）
+//   3. 队列处理器（5s）：逐条取出 → sessions_send → 提取 reply → message tool 分发
+//   4. 失败重试：最多 3 次，超过则 fallback 到 prependContext + directMsg
+//   5. Agent Offline：入队超 10 分钟未处理 → 自动 REJECT + 通知用户
+//   6. 去重三层：notifiedMeetings(磁盘) / submittedMeetings(内存) / pendingDecisions(磁盘)
 // ============================================================
 
 import { readFileSync, existsSync } from "fs";
@@ -189,7 +186,7 @@ export default function register(api: any) {
   async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean; reply?: string }> {
     const sk = sessionKey ?? sessionCtx.sessionKey ?? "agent:main:main";
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000); // 30s：lane wait 可能耗时 10-15s
+    const timeout = setTimeout(() => controller.abort(), 60000); // 60s：agent 可能调用 LLM 或等待用户输入
     const startMs = Date.now();
 
     console.log(`[CM:push] >>> sessions_send 目标=${sk} 消息长度=${message.length} 消息前100字="${message.substring(0, 100).replace(/\n/g, "\\n")}"`);
@@ -307,22 +304,6 @@ export default function register(api: any) {
     }
   }
 
-  /**
-   * 推送需要 Agent 静默处理的消息（INITIAL_SUBMIT 等）
-   * 仅走 sessions_send 触发 agent turn，不推送给用户
-   */
-  async function pushAgentMessage(message: string): Promise<boolean> {
-    if (!gatewayToken) {
-      console.log(`[CM:push] pushAgentMessage 跳过: 无 gatewayToken`);
-      return false;
-    }
-    console.log(`[CM:push] pushAgentMessage 开始 → 仅主 session`);
-    const { ok } = await sendViaSessionsSend(message);
-    console.log(`[CM:push] pushAgentMessage 结果: ${ok ? "成功" : "失败"}`);
-    return ok;
-  }
-
-
   // ============================================================
   // 6. 通知去重 + 提交去重
   // ============================================================
@@ -336,8 +317,20 @@ export default function register(api: any) {
   console.log(`[CM:dedup] 初始状态: pendingDecisions=${pendingDecisions.size}个 [${[...pendingDecisions].map(id => id.slice(-8)).join(",")}]`);
 
   // ============================================================
-  // 7. 待推送通知队列（备用：主动推送失败时 fallback 到 prependContext）
+  // 7. 任务队列 + 待推送通知（fallback）
   // ============================================================
+  interface QueuedTask {
+    task: any;              // 原始任务对象
+    retryCount: number;     // sessions_send 重试次数
+    enqueuedAt: number;     // Date.now() 入队时间
+    agentMsg: string;       // buildAgentNotification 预构建（给 agent）
+    directMsg: string;      // buildDirectNotification 预构建（给渠道/fallback）
+  }
+  const taskQueue: QueuedTask[] = [];
+  let isProcessingQueue = false;
+  const QUEUE_PROCESS_INTERVAL = 5000;  // 5s 处理一次
+  const MAX_RETRY = 3;
+  const OFFLINE_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
   let pendingNotifications: string[] = [];
 
   // ============================================================
@@ -378,18 +371,16 @@ export default function register(api: any) {
 
 
   // ============================================================
-  // 9. 自动响应逻辑
-  // 关键设计：先收集所有通知 + 同步去重 + 持久化，最后一次性推送
-  // 避免多个 system event 并发触发多个 agent turn 导致重复
+  // 9. 任务收集 + 队列处理（逐条：sessions_send → 提取 reply → message tool 分发）
   // ============================================================
-  async function autoRespondToTasks(tasks: unknown[]): Promise<string[]> {
-    console.log(`[CM:notify] === autoRespondToTasks 开始，共 ${tasks.length} 个任务 ===`);
-    console.log(`[CM:notify] 当前去重状态: notified=${notifiedMeetings.size}, submitted=${submittedMeetings.size}, pending=${pendingDecisions.size}`);
-    const userMessages: string[] = [];
 
-    // 统一收集：所有通知走同一路径（sessions_send → 提取 reply → message tool 分发）
-    const agentNotifications: string[] = [];         // 给主 session agent 的指令文本
-    const directFallbacks: string[] = [];            // reply 提取失败时的 fallback 文本
+  /**
+   * collectTasks: 去重过滤 + 构建通知文本 + 入队
+   * 仅做入队，不做推送（毫秒级，不阻塞轮询）
+   */
+  async function collectTasks(tasks: unknown[]): Promise<string[]> {
+    console.log(`[CM:collect] === 收集 ${tasks.length} 个任务 ===`);
+    console.log(`[CM:collect] 去重状态: notified=${notifiedMeetings.size}, submitted=${submittedMeetings.size}, pending=${pendingDecisions.size}, queue=${taskQueue.length}`);
 
     for (const task of tasks) {
       const t = task as any;
@@ -397,12 +388,14 @@ export default function register(api: any) {
       const title = t.title ?? "未知会议";
       const taskType = t.task_type;
 
-      console.log(`[CM:notify] 处理任务: type=${taskType}, meetingId=${meetingId?.slice(-8)}, title="${title}"`);
+      console.log(`[CM:collect] 任务: type=${taskType}, meetingId=${meetingId?.slice(-8)}, title="${title}"`);
 
       // ---- INITIAL_SUBMIT：agent 静默处理 ----
       if (taskType === "INITIAL_SUBMIT") {
-        if (submittedMeetings.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 submittedMeetings`); continue; }
-        if (pendingDecisions.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 pendingDecisions`); continue; }
+        if (submittedMeetings.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 submittedMeetings`); continue; }
+        if (pendingDecisions.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 pendingDecisions`); continue; }
+        // 检查是否已在队列中
+        if (taskQueue.some(q => q.task.meeting_id === meetingId)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
 
         submittedMeetings.add(meetingId);
 
@@ -429,46 +422,69 @@ export default function register(api: any) {
           }
         } catch (_e) { /* ignore */ }
 
-        agentNotifications.push(notifyLines.join("\n"));
-        directFallbacks.push(buildDirectNotification(t));
-        console.log(`[CM:notify]   → 收集 INITIAL_SUBMIT: 「${title}」(${meetingId}) 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
+        taskQueue.push({
+          task: t,
+          retryCount: 0,
+          enqueuedAt: Date.now(),
+          agentMsg: notifyLines.join("\n"),
+          directMsg: buildDirectNotification(t),
+        });
+        console.log(`[CM:collect]   → 入队 INITIAL_SUBMIT: 「${title}」(${meetingId})`);
         continue;
       }
 
       // ---- COUNTER_PROPOSAL：需要用户决策 ----
       if (taskType === "COUNTER_PROPOSAL") {
-        if (pendingDecisions.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 pendingDecisions`); continue; }
+        if (pendingDecisions.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 pendingDecisions`); continue; }
+        if (taskQueue.some(q => q.task.meeting_id === meetingId)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
         pendingDecisions.add(meetingId);
         savePendingDecisions([...pendingDecisions]);
 
-        agentNotifications.push(buildAgentNotification(t));
-        directFallbacks.push(buildDirectNotification(t));
-        console.log(`[CM:notify]   → 收集 COUNTER_PROPOSAL: 「${title}」(${meetingId}) round=${t.round_count ?? 0} 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
+        taskQueue.push({
+          task: t,
+          retryCount: 0,
+          enqueuedAt: Date.now(),
+          agentMsg: buildAgentNotification(t),
+          directMsg: buildDirectNotification(t),
+        });
+        console.log(`[CM:collect]   → 入队 COUNTER_PROPOSAL: 「${title}」(${meetingId})`);
         continue;
       }
 
       // ---- MEETING_FAILED：需要发起人决策 ----
       if (taskType === "MEETING_FAILED") {
-        if (pendingDecisions.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 pendingDecisions`); continue; }
+        if (pendingDecisions.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 pendingDecisions`); continue; }
+        if (taskQueue.some(q => q.task.meeting_id === meetingId)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
         pendingDecisions.add(meetingId);
         savePendingDecisions([...pendingDecisions]);
 
-        agentNotifications.push(buildAgentNotification(t));
-        directFallbacks.push(buildDirectNotification(t));
-        console.log(`[CM:notify]   → 收集 MEETING_FAILED: 「${title}」(${meetingId}) 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
+        taskQueue.push({
+          task: t,
+          retryCount: 0,
+          enqueuedAt: Date.now(),
+          agentMsg: buildAgentNotification(t),
+          directMsg: buildDirectNotification(t),
+        });
+        console.log(`[CM:collect]   → 入队 MEETING_FAILED: 「${title}」(${meetingId})`);
         continue;
       }
 
       // ---- CONFIRMED / OVER 等：纯通知 ----
-      if (notifiedMeetings.has(meetingId)) { console.log(`[CM:notify]   → 跳过: 已在 notifiedMeetings`); continue; }
+      if (notifiedMeetings.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 notifiedMeetings`); continue; }
+      if (taskQueue.some(q => q.task.meeting_id === meetingId)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
       notifiedMeetings.add(meetingId);
 
-      agentNotifications.push(buildAgentNotification(t));
-      directFallbacks.push(buildDirectNotification(t));
-      console.log(`[CM:notify]   → 收集 ${taskType}: 「${title}」(${meetingId}) 消息摘要="${(t.message ?? "").substring(0, 100)}"`);
+      taskQueue.push({
+        task: t,
+        retryCount: 0,
+        enqueuedAt: Date.now(),
+        agentMsg: buildAgentNotification(t),
+        directMsg: buildDirectNotification(t),
+      });
+      console.log(`[CM:collect]   → 入队 ${taskType}: 「${title}」(${meetingId})`);
     }
 
-    // ==== 先持久化，再推送（确保不会因重启丢失去重状态）====
+    // 持久化 notifiedMeetings（避免重启丢失）
     if (notifiedMeetings.size > 200) {
       const arr = [...notifiedMeetings];
       const keep = arr.slice(arr.length - 100);
@@ -479,59 +495,112 @@ export default function register(api: any) {
       saveNotifiedMeetings([...notifiedMeetings]);
     }
 
-    if (agentNotifications.length === 0) {
-      console.log(`[CM:notify] 无新通知需要推送，结束`);
-      return userMessages;
-    }
+    console.log(`[CM:collect] 收集完成，队列长度=${taskQueue.length}`);
+    return []; // collectTasks 不产生 fallback 消息，由 processQueue 处理
+  }
 
-    // ==== 统一推送：sessions_send → 提取 reply → message tool 分发 ====
-    const batchMsg = agentNotifications.join("\n\n---\n\n");
-    const fallbackMsg = directFallbacks.join("\n\n---\n\n");
+  /**
+   * processQueue: 从队列逐条取出处理
+   * 每条：sessions_send → 提取 reply → message tool 分发
+   * 失败则 retryCount++ 留在队列；超过 MAX_RETRY 或 OFFLINE_TIMEOUT 则放弃
+   */
+  async function processQueue(): Promise<void> {
+    if (isProcessingQueue) return;
+    if (taskQueue.length === 0) return;
+    isProcessingQueue = true;
 
-    console.log(`[CM:notify] === 开始推送 ${agentNotifications.length} 条通知 ===`);
-    console.log(`[CM:notify] 推送前去重状态: notified=${notifiedMeetings.size}, submitted=${submittedMeetings.size}, pending=${pendingDecisions.size}`);
+    console.log(`[CM:queue] === 开始处理队列，共 ${taskQueue.length} 条 ===`);
+    const now = Date.now();
 
-    // ---- Step 1: sessions_send 到主 session → agent 处理 + 提取 reply ----
-    console.log(`[CM:notify] [Step1] sessions_send → 主 session: ${sessionCtx.sessionKey} (${batchMsg.length}字)`);
-    const { ok: mainOk, reply } = await sendViaSessionsSend(batchMsg);
+    // 逐条处理（取第一条，处理完再取下一条）
+    while (taskQueue.length > 0) {
+      const item = taskQueue[0];
+      const t = item.task;
+      const meetingId = t.meeting_id;
+      const title = t.title ?? "未知会议";
+      const taskType = t.task_type;
+      const ageMs = now - item.enqueuedAt;
 
-    if (!mainOk) {
-      console.error(`[CM:notify] 主 session 推送失败，fallback 到 prependContext`);
-      userMessages.push(...agentNotifications);
+      // ---- Agent Offline 检测：入队超过 10 分钟未处理 ----
+      if (ageMs >= OFFLINE_TIMEOUT_MS) {
+        console.log(`[CM:queue] 任务超时 ${Math.round(ageMs / 60000)}min，上报 AGENT_OFFLINE: ${taskType}(${meetingId?.slice(-8)}) 「${title}」`);
+        taskQueue.shift(); // 移出队列
 
-      // 主 session 失败，额外渠道用 fallback 文本直推
-      for (const [chName, chCtx] of extraChannels) {
-        const target = parseChannelTarget(chCtx.sessionKey);
-        if (target) {
-          console.log(`[CM:notify] [Step2-fallback] ${chName} 推送 directFallback`);
-          await sendViaMessageTool(target.channel, target.target, fallbackMsg);
+        // 上报 REJECT + 原因说明
+        try {
+          await apiClient.submitAvailability(meetingId, {
+            response_type: "REJECT",
+            available_slots: [],
+            preference_note: "Agent offline - 用户 Agent 在 10 分钟内未能响应此任务",
+          });
+          console.log(`[CM:queue] AGENT_OFFLINE 上报成功: ${meetingId?.slice(-8)}`);
+        } catch (err) {
+          console.error(`[CM:queue] AGENT_OFFLINE 上报失败: ${meetingId?.slice(-8)}: ${(err as Error)?.message}`);
         }
-      }
-    } else {
-      console.log(`[CM:notify] 主 session 推送成功`);
 
-      // ---- Step 2: 提取 reply → message tool 分发到所有额外渠道 ----
+        // 通知用户（额外渠道）
+        const offlineMsg = `⚠️ 会议「${title}」因 Agent 离线超时（10 分钟），已自动拒绝。如需参加请重新协商。`;
+        for (const [chName, chCtx] of extraChannels) {
+          const target = parseChannelTarget(chCtx.sessionKey);
+          if (target) {
+            await sendViaMessageTool(target.channel, target.target, offlineMsg);
+          }
+        }
+        // fallback 到 webchat prependContext
+        pendingNotifications.push(offlineMsg);
+
+        notifiedMeetings.add(meetingId);
+        saveNotifiedMeetings([...notifiedMeetings]);
+        continue;
+      }
+
+      // ---- 正常处理：sessions_send → 提取 reply → message tool 分发 ----
+      console.log(`[CM:queue] 处理: ${taskType}(${meetingId?.slice(-8)}) 「${title}」 retry=${item.retryCount} age=${Math.round(ageMs / 1000)}s`);
+
+      const { ok: mainOk, reply } = await sendViaSessionsSend(item.agentMsg);
+
+      if (!mainOk) {
+        item.retryCount++;
+        if (item.retryCount >= MAX_RETRY) {
+          console.error(`[CM:queue] 超过最大重试次数(${MAX_RETRY})，fallback: ${taskType}(${meetingId?.slice(-8)})`);
+          taskQueue.shift();
+          // fallback: 用 directMsg（用户友好格式）而不是 agentMsg（原始指令）
+          pendingNotifications.push(item.directMsg);
+          // 额外渠道也推 directMsg
+          for (const [chName, chCtx] of extraChannels) {
+            const target = parseChannelTarget(chCtx.sessionKey);
+            if (target) {
+              await sendViaMessageTool(target.channel, target.target, item.directMsg);
+            }
+          }
+        } else {
+          console.log(`[CM:queue] sessions_send 失败，留在队列等下次重试 (retry=${item.retryCount}/${MAX_RETRY})`);
+          break; // 不再处理后续任务，等下一轮
+        }
+        continue;
+      }
+
+      // sessions_send 成功，移出队列
+      taskQueue.shift();
+      console.log(`[CM:queue] sessions_send 成功`);
+
+      // 提取 reply → message tool 分发到额外渠道
       if (extraChannels.size > 0) {
-        const channelMsg = reply || fallbackMsg;
+        const channelMsg = reply || item.directMsg;
         const source = reply ? "agent reply" : "directFallback";
 
         for (const [chName, chCtx] of extraChannels) {
           const target = parseChannelTarget(chCtx.sessionKey);
           if (target) {
-            console.log(`[CM:notify] [Step2] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
-            const { ok } = await sendViaMessageTool(target.channel, target.target, channelMsg);
-            console.log(`[CM:notify] ${chName} 推送结果: ${ok ? "成功" : "失败"}`);
-          } else {
-            console.error(`[CM:notify] ${chName} sessionKey 解析失败: ${chCtx.sessionKey}`);
+            console.log(`[CM:queue] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
+            await sendViaMessageTool(target.channel, target.target, channelMsg);
           }
         }
-      } else {
-        console.log(`[CM:notify] 无额外渠道，跳过 Step2`);
       }
     }
 
-    console.log(`[CM:notify] === 推送完成 ===`);
-    return userMessages;
+    console.log(`[CM:queue] === 队列处理完成，剩余 ${taskQueue.length} 条 ===`);
+    isProcessingQueue = false;
   }
 
   // ============================================================
@@ -583,19 +652,37 @@ export default function register(api: any) {
       }
       return { ...(result as any), task_results: newTasks, pending_count: newTasks.length };
     },
-    onAutoRespond: autoRespondToTasks,
+    onAutoRespond: collectTasks,
     onNotifyUser: (messages: string[]) => {
-      // fallback 通知（主动推送失败时才会有内容）
+      // fallback 通知（collectTasks 不产生 fallback，保留接口兼容）
       pendingNotifications.push(...messages);
     },
   });
 
+  // 队列处理器：独立于轮询，5s 间隔逐条处理
+  let queueTimer: ReturnType<typeof setInterval> | null = null;
+
   // ============================================================
   // 11. 插件加载时：有 Token 立即启动轮询
   // ============================================================
+  function startQueueProcessor() {
+    if (queueTimer) return;
+    queueTimer = setInterval(() => processQueue(), QUEUE_PROCESS_INTERVAL);
+    console.log(`[CM:queue] 队列处理器启动，间隔 ${QUEUE_PROCESS_INTERVAL}ms`);
+  }
+
+  function stopQueueProcessor() {
+    if (queueTimer) {
+      clearInterval(queueTimer);
+      queueTimer = null;
+      console.log(`[CM:queue] 队列处理器已停止`);
+    }
+  }
+
   if (apiClient.getToken()) {
     console.log("[CM:init] 有已保存的 Token，立即启动轮询");
     pollingManager.start();
+    startQueueProcessor();
   } else {
     console.log("[CM:init] 无 Token，轮询不启动（等待用户绑定邮箱）");
   }
@@ -609,11 +696,13 @@ export default function register(api: any) {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] Service start: 启动轮询。");
         pollingManager.start();
+        startQueueProcessor();
       }
     },
     stop: (_ctx: any) => {
       console.log("[CM:lifecycle] Service stop: 停止轮询。");
       pollingManager.stop();
+      stopQueueProcessor();
     },
   });
 
@@ -626,6 +715,7 @@ export default function register(api: any) {
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
+        startQueueProcessor();
       }
     },
   );
@@ -634,6 +724,7 @@ export default function register(api: any) {
     "gateway_stop",
     () => {
       pollingManager.stop();
+      stopQueueProcessor();
       console.log("[CM:lifecycle] gateway_stop: 停止轮询。");
     },
   );
@@ -651,6 +742,7 @@ export default function register(api: any) {
         if (!pollingManager.isRunning()) {
           console.log(`[CM:tool] bind_identity → 绑定成功，启动轮询`);
           pollingManager.start();
+          startQueueProcessor();
         }
       });
       const result = await handler(params);
@@ -668,6 +760,7 @@ export default function register(api: any) {
         if (!pollingManager.isRunning()) {
           console.log(`[CM:tool] verify_email_code → 绑定成功，启动轮询`);
           pollingManager.start();
+          startQueueProcessor();
         }
       });
       const result = await handler(params);
