@@ -59,25 +59,67 @@ class CoordinatorResult(BaseModel):
             raise ValueError(f"final_time 格式错误：{v!r}，应为 YYYY-MM-DD HH:MM-HH:MM")
         return v
 
+# ─── 时间计算辅助 ─────────────────────────────────────────────────────────────
+
+
+def _slot_duration_minutes(start_str: str, end_str: str) -> int:
+    """计算两个时间戳之间的分钟数"""
+    from datetime import datetime
+    try:
+        start = datetime.fromisoformat(start_str)
+        end = datetime.fromisoformat(end_str)
+        return max(0, int((end - start).total_seconds() / 60))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _check_duration_capacity(participants_info: list, duration_minutes: int) -> list:
+    """规则兜底：检查参会人可用时间是否满足会议时长"""
+    insufficient = []
+    for p in participants_info:
+        slots = p.get("latest_slots") or []
+        if not slots:
+            continue
+        total_minutes = sum(
+            _slot_duration_minutes(s.get("start", ""), s.get("end", ""))
+            for s in slots if isinstance(s, dict)
+        )
+        if 0 < total_minutes < duration_minutes:
+            insufficient.append({
+                "email": p.get("email", f"user_id={p.get('user_id')}"),
+                "available_minutes": total_minutes,
+            })
+    return insufficient
+
+
 # ─── 会议结构变更检测 ─────────────────────────────────────────────────────────
 
-def _detect_preference_issues(participants_info: list[dict]) -> dict | None:
+def _detect_preference_issues(participants_info: list[dict], duration_minutes: int = 0) -> dict | None:
     """
-    用 LLM 统一检测 preference_note 中的问题，包括：
+    用 LLM 统一检测参与者的问题，包括：
       1. 拒绝参会（明确表示不参加、拒绝）
       2. 会议结构变更（修改时长、拆分会议、增减人员、改变形式等）
+      3. 可用时间不足（参会人的可用时间总长 < 会议所需时长）
 
-    返回 {"type": "rejected"|"structural_change", "detail": "..."} 或 None。
+    返回 {"type": "rejected"|"structural_change"|"capacity_mismatch", "detail": "..."} 或 None。
     """
     notes = []
     for p in participants_info:
         note = (p.get("preference_note") or "").strip()
-        if not note:
-            continue
         email = p.get("email", "unknown")
         slots = p.get("latest_slots") or []
-        slots_info = f"（已提交时间: {', '.join(str(s) for s in slots[:3])}）" if slots else "（未提交时间）"
-        notes.append(f"{email}{slots_info}: {note}")
+
+        # 计算参会人可用时间总长
+        total_minutes = sum(
+            _slot_duration_minutes(s.get("start", ""), s.get("end", ""))
+            for s in slots if isinstance(s, dict)
+        )
+        capacity_info = f"（可用时间: {total_minutes}分钟）" if total_minutes > 0 else "（未提交时间）"
+
+        if note:
+            notes.append(f"{email}{capacity_info}: {note}")
+        elif duration_minutes > 0 and 0 < total_minutes < duration_minutes:
+            notes.append(f"{email}{capacity_info}: [用户未备注，但提交的可用时间不足会议所需的{duration_minutes}分钟]")
 
     if not notes:
         return None
@@ -89,20 +131,28 @@ def _detect_preference_issues(participants_info: list[dict]) -> dict | None:
         temperature=0,
     )
 
+    duration_context = f"会议所需时长为 {duration_minutes} 分钟。" if duration_minutes > 0 else ""
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", (
-            "你是一个会议协调助手。分析以下参与者备注，判断是否存在以下两类问题：\n\n"
+            f"你是一个会议协调助手。{duration_context}\n"
+            "分析以下参与者备注和可用时间，判断是否存在以下三类问题：\n\n"
             "1. **拒绝参会**：参与者明确表示不参加、拒绝会议、无法出席。\n"
             "   标记为 [已拒绝] 的备注一定是拒绝。\n"
             "   例如：「我不参加了」「这个会我就不去了」「[已拒绝] 时间不合适」\n\n"
             "2. **会议结构变更**：参与者建议修改会议本身的设置，而非单纯的时间偏好。\n"
             "   包括但不限于：修改时长、拆分会议、增减人员、改变形式（线上/线下/邮件代替）。\n"
             "   例如：「建议改成30分钟」「建议分两次开」「建议也叫上某某」「改成邮件沟通吧」\n\n"
+            "3. **可用时间不足**：参与者提交的可用时间总长小于会议所需时长。\n"
+            "   这意味着即使协商也无法满足会议需求，属于隐式的结构性问题。\n"
+            "   例如：会议需要120分钟，但参与者只有30分钟可用\n"
+            "   注意：「我只能参加30分钟」「我只有1小时」这类表述也属于此类\n\n"
             "纯时间偏好（如「我更喜欢下午」「周五不方便」「尽量安排在上午」）不属于以上任何一类。\n\n"
             "请输出一行：\n"
             "- 如果检测到拒绝：rejected: 简短描述（如 bob@x.com 拒绝参会，原因：时间不合适）\n"
             "- 如果检测到结构变更：structural_change: 简短描述（如 bob@x.com 建议将时长改为30分钟）\n"
-            "- 如果两者都有，优先输出 rejected\n"
+            "- 如果检测到可用时间不足：capacity_mismatch: 简短描述（如 bob@x.com 仅有30分钟可用，不足会议所需120分钟）\n"
+            "- 优先级：rejected > structural_change > capacity_mismatch\n"
             "- 如果都没有：无"
         )),
         ("human", "参与者备注：\n{notes}"),
@@ -117,6 +167,8 @@ def _detect_preference_issues(participants_info: list[dict]) -> dict | None:
             return {"type": "rejected", "detail": answer[len("rejected:"):].strip()}
         if answer.startswith("structural_change:"):
             return {"type": "structural_change", "detail": answer[len("structural_change:"):].strip()}
+        if answer.startswith("capacity_mismatch:"):
+            return {"type": "capacity_mismatch", "detail": answer[len("capacity_mismatch:"):].strip()}
         # 兜底：无法解析的格式视为无问题
         logger.warning("preference_note 检测返回未知格式: %s", answer)
         return None
@@ -453,9 +505,9 @@ def summarize_meeting(
             "counter_proposals": [],
         }
 
-    # ── FAILED：LLM 统一检测 preference_note（拒绝 / 结构变更） ─────────────
+    # ── FAILED：LLM 统一检测（拒绝 / 结构变更 / 可用时间不足） ─────────────
     if participants_info:
-        issue = _detect_preference_issues(participants_info)
+        issue = _detect_preference_issues(participants_info, duration_minutes)
         if issue:
             if issue["type"] == "rejected":
                 logger.info("LLM 检测到参与者拒绝，直接 FAILED: %s", issue["detail"])
@@ -473,6 +525,27 @@ def summarize_meeting(
                     "agent_reasoning": f"有参与者提出了会议结构调整建议，当前会议设置需要发起人重新确认：{issue['detail']}",
                     "counter_proposals": [],
                 }
+            elif issue["type"] == "capacity_mismatch":
+                logger.info("LLM 检测到参会人可用时间不足: %s", issue["detail"])
+                return {
+                    "decision_status": "FAILED",
+                    "final_time": None,
+                    "agent_reasoning": f"参会人可用时间不足以满足会议需求：{issue['detail']}。建议发起人调整会议时长或与参会人协调。",
+                    "counter_proposals": [],
+                }
+
+    # ── 规则兜底：参会人可用时间不足 ──────────────────────────────────────
+    if participants_info:
+        insufficient = _check_duration_capacity(participants_info, duration_minutes)
+        if insufficient:
+            detail = "；".join(f"{p['email']} 仅有 {p['available_minutes']} 分钟" for p in insufficient)
+            logger.info("[%s] 规则兜底-参会人可用时间不足: %s", meeting_id, detail)
+            return {
+                "decision_status": "FAILED",
+                "final_time": None,
+                "agent_reasoning": f"会议需要 {duration_minutes} 分钟，但以下参会人的可用时间不足：{detail}。建议发起人调整会议时长或与参会人协调。",
+                "counter_proposals": [],
+            }
 
     path = _score_file(meeting_id)
     if not path.exists():
