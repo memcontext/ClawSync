@@ -538,16 +538,17 @@ export default function register(api: any) {
           console.error(`[CM:queue] AGENT_OFFLINE 上报失败: ${meetingId?.slice(-8)}: ${(err as Error)?.message}`);
         }
 
-        // 通知用户（额外渠道）
-        const offlineMsg = `⚠️ 会议「${title}」因 Agent 离线超时（10 分钟），已自动拒绝。如需参加请重新协商。`;
-        for (const [chName, chCtx] of extraChannels) {
-          const target = parseChannelTarget(chCtx.sessionKey);
-          if (target) {
-            await sendViaMessageTool(target.channel, target.target, offlineMsg);
+        // INITIAL_SUBMIT 不通知用户（静默处理），其他类型通知
+        if (taskType !== "INITIAL_SUBMIT") {
+          const offlineMsg = `⚠️ 会议「${title}」因 Agent 离线超时（10 分钟），已自动拒绝。如需参加请重新协商。`;
+          for (const [chName, chCtx] of extraChannels) {
+            const target = parseChannelTarget(chCtx.sessionKey);
+            if (target) {
+              await sendViaMessageTool(target.channel, target.target, offlineMsg);
+            }
           }
+          pendingNotifications.push(offlineMsg);
         }
-        // fallback 到 webchat prependContext
-        pendingNotifications.push(offlineMsg);
 
         notifiedMeetings.add(meetingId);
         saveNotifiedMeetings([...notifiedMeetings]);
@@ -564,13 +565,18 @@ export default function register(api: any) {
         if (item.retryCount >= MAX_RETRY) {
           console.error(`[CM:queue] 超过最大重试次数(${MAX_RETRY})，fallback: ${taskType}(${meetingId?.slice(-8)})`);
           taskQueue.shift();
-          // fallback: 用 directMsg（用户友好格式）而不是 agentMsg（原始指令）
-          pendingNotifications.push(item.directMsg);
-          // 额外渠道也推 directMsg
-          for (const [chName, chCtx] of extraChannels) {
-            const target = parseChannelTarget(chCtx.sessionKey);
-            if (target) {
-              await sendViaMessageTool(target.channel, target.target, item.directMsg);
+          // INITIAL_SUBMIT 是 agent 静默处理，失败时不推给用户（用户不需要知道这个中间状态）
+          if (taskType === "INITIAL_SUBMIT") {
+            console.log(`[CM:queue] INITIAL_SUBMIT 失败，不推送到用户渠道，等下次轮询重新入队`);
+            submittedMeetings.delete(meetingId); // 允许下次轮询重新发现
+          } else {
+            // 其他类型推 directMsg 到用户
+            pendingNotifications.push(item.directMsg);
+            for (const [chName, chCtx] of extraChannels) {
+              const target = parseChannelTarget(chCtx.sessionKey);
+              if (target) {
+                await sendViaMessageTool(target.channel, target.target, item.directMsg);
+              }
             }
           }
         } else {
@@ -584,8 +590,11 @@ export default function register(api: any) {
       taskQueue.shift();
       console.log(`[CM:queue] sessions_send 成功`);
 
-      // 提取 reply → message tool 分发到额外渠道
-      if (extraChannels.size > 0) {
+      // INITIAL_SUBMIT 是 agent 静默处理，不推到额外渠道（用户不需要看到中间状态）
+      if (taskType === "INITIAL_SUBMIT") {
+        console.log(`[CM:queue] INITIAL_SUBMIT 静默处理完成，不推送到额外渠道`);
+      } else if (extraChannels.size > 0) {
+        // 其他类型：提取 reply → message tool 分发到额外渠道
         const channelMsg = reply || item.directMsg;
         const source = reply ? "agent reply" : "directFallback";
 
