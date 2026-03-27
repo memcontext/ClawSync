@@ -194,7 +194,6 @@ clawmeeting/
 ├── package.json
 ├── openclaw.plugin.json        # Plugin manifest
 ├── README.md                   # This file
-├── GUIDE.md                    # End-user guide
 ├── skills/
 │   └── clawmeeting-guide/
 │       └── SKILL.md            # Agent skill for onboarding
@@ -415,7 +414,6 @@ clawmeeting/
 ├── package.json
 ├── openclaw.plugin.json        # 插件清单
 ├── README.md                   # 本文件
-├── GUIDE.md                    # 终端用户引导文档
 ├── skills/
 │   └── clawmeeting-guide/
 │       └── SKILL.md            # Agent 引导技能
