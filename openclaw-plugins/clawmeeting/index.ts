@@ -224,12 +224,15 @@ export default function register(api: any) {
         }
 
         // 提取 agent reply：response 结构为 { ok, result: { details: { reply, status, ... } } }
+        // 注意：此路径是实测观察所得，非官方文档保证。Agent 调用工具后再回复时结构可能不同。
         let reply: string | undefined;
         try {
           const json = JSON.parse(body);
           reply = json?.result?.details?.reply ?? undefined;
+          // debug：打印完整 body 以便确认结构（上线后可移除）
+          console.log(`[CM:push] response body full: ${body.substring(0, 1000)}`);
         } catch (_e) {
-          // body 不是 JSON 或结构不同，reply 保持 undefined
+          console.warn(`[CM:push] response body 非 JSON: ${body.substring(0, 300)}`);
         }
 
         console.log(`[CM:push] <<< sessions_send 成功 → ${sk} (${elapsed}ms) reply=${reply ? `"${reply.substring(0, 150)}..."` : "无"}`);
