@@ -325,6 +325,10 @@ def _notify_failed_initiator_only(meeting, logs, reason, db):
         else:
             slots_preview = ", ".join(log.latest_slots[:3])
             status = f"可用: {slots_preview}"
+        # 附加 preference_note（非拒绝者的备注，如"建议改成30分钟"）
+        note = (log.preference_note or "").strip()
+        if note and not note.startswith("[已拒绝]"):
+            status += f" | 备注: {note}"
         participants_info.append(f"  {email}: {status}")
     detail = "\n".join(participants_info)
 
