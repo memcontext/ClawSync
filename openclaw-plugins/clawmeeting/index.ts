@@ -475,10 +475,11 @@ export default function register(api: any) {
         continue;
       }
 
-      // ---- CONFIRMED / OVER 等：纯通知 ----
-      if (notifiedMeetings.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 notifiedMeetings`); continue; }
-      if (taskQueue.some(q => q.task.meeting_id === meetingId)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
-      notifiedMeetings.add(meetingId);
+      // ---- CONFIRMED / OVER 等：纯通知（用 meetingId:taskType 去重，同一会议不同阶段独立通知）----
+      const dedupKey = `${meetingId}:${taskType}`;
+      if (notifiedMeetings.has(dedupKey)) { console.log(`[CM:collect]   → 跳过: 已在 notifiedMeetings (${dedupKey})`); continue; }
+      if (taskQueue.some(q => q.task.meeting_id === meetingId && q.task.task_type === taskType)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
+      notifiedMeetings.add(dedupKey);
 
       taskQueue.push({
         task: t,
@@ -556,7 +557,7 @@ export default function register(api: any) {
           pendingNotifications.push(offlineMsg);
         }
 
-        notifiedMeetings.add(meetingId);
+        notifiedMeetings.add(`${meetingId}:${taskType}`);
         saveNotifiedMeetings([...notifiedMeetings]);
         continue;
       }
@@ -644,10 +645,11 @@ export default function register(api: any) {
       const newTasks = taskResults.filter((t: any) => {
         const tt = t.task_type;
         const mid = t.meeting_id;
-        // CONFIRMED/OVER：纯通知去重
+        // CONFIRMED/OVER：纯通知去重（用 mid:tt 组合 key，同一会议不同阶段独立通知）
         if (tt === "MEETING_CONFIRMED" || tt === "MEETING_OVER") {
-          const dup = notifiedMeetings.has(mid);
-          if (dup) console.log(`[CM:dedup] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 notifiedMeetings`);
+          const dedupKey = `${mid}:${tt}`;
+          const dup = notifiedMeetings.has(dedupKey);
+          if (dup) console.log(`[CM:dedup] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 notifiedMeetings (${dedupKey})`);
           return !dup;
         }
         // FAILED：需要发起人决策，用 pendingDecisions 去重
@@ -668,8 +670,8 @@ export default function register(api: any) {
           if (dup) console.log(`[CM:dedup] 去重跳过 ${tt}(${mid?.slice(-8)}) — 已在 pendingDecisions`);
           return !dup;
         }
-        // 其它未知类型：用 notifiedMeetings 去重，防止重复推送
-        return !notifiedMeetings.has(mid);
+        // 其它未知类型：用 mid:tt 组合 key 去重
+        return !notifiedMeetings.has(`${mid}:${tt}`);
       });
       if (newTasks.length > 0) {
         console.log(`[CM:poll] 轮询发现 ${newTasks.length} 个新待办任务: ${newTasks.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
