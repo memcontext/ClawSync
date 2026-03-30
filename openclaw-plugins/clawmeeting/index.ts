@@ -9,7 +9,7 @@
 //   6. 去重三层：notifiedMeetings(磁盘) / submittedMeetings(内存) / pendingDecisions(磁盘)
 // ============================================================
 
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { ClawMeetingApiClient } from "./src/utils/api-client.js";
@@ -84,30 +84,32 @@ export default function register(api: any) {
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // ============================================================
-  // 0. 自动确保 sessions_send 在 gateway.tools.allow 中
+  // 0. 自动确保 sessions_send 在 gateway.tools.allow 中（直接写 openclaw.json）
   // ============================================================
   function ensureToolAllowlist() {
-    const gatewayTools = api.config?.gateway?.tools;
-    const allow: string[] = gatewayTools?.allow ?? [];
-    if (!allow.includes("sessions_send")) {
-      console.log("[CM:init] sessions_send 不在 gateway.tools.allow，尝试自动添加...");
-      const port = api.config?.gateway?.port ?? 18789;
-      const token = api.config?.gateway?.auth?.token ?? process.env.OPENCLAW_GATEWAY_TOKEN ?? "";
-      fetch(`http://127.0.0.1:${port}/config/patch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-        body: JSON.stringify({ path: "gateway.tools", value: { allow: [...allow, "sessions_send"] } }),
-      }).then(res => {
-        if (res.ok) console.log("[CM:init] ✅ 已自动将 sessions_send 加入 gateway.tools.allow");
-        else console.warn("[CM:init] ⚠️ 自动配置失败，需手动添加 gateway.tools.allow: ['sessions_send']");
-      }).catch(err => {
-        console.warn(`[CM:init] ⚠️ 自动配置异常: ${(err as Error)?.message}`);
-      });
-    } else {
-      console.log("[CM:init] sessions_send 已在 gateway.tools.allow ✅");
+    try {
+      const configPath = join(homedir(), ".openclaw", "openclaw.json");
+      if (!existsSync(configPath)) {
+        console.warn("[CM:init] ⚠️ openclaw.json 不存在，跳过自动配置");
+        return;
+      }
+      const raw = readFileSync(configPath, "utf-8");
+      const config = JSON.parse(raw);
+      const allow: string[] = config?.gateway?.tools?.allow ?? [];
+      if (allow.includes("sessions_send")) {
+        console.log("[CM:init] sessions_send 已在 gateway.tools.allow ✅");
+        return;
+      }
+      // 写入
+      if (!config.gateway) config.gateway = {};
+      if (!config.gateway.tools) config.gateway.tools = {};
+      config.gateway.tools.allow = [...allow, "sessions_send"];
+      writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+      console.log("[CM:init] ✅ 已自动将 sessions_send 加入 gateway.tools.allow（重启 gateway 后生效）");
+    } catch (err) {
+      console.warn(`[CM:init] ⚠️ 自动配置 sessions_send 失败: ${(err as Error)?.message}`);
     }
   }
-  // ensureToolAllowlist() 在 gateway_start 时调用，避免 gateway 未就绪时 fetch 失败
 
   const PLUGIN_ID = readPluginId();
 
