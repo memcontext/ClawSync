@@ -343,14 +343,53 @@ export default function register(api: any) {
   // 8. 通知构建
   // ============================================================
 
-  /** 给主 session agent 的通知（带类型标记 + 指令，agent 看到后完整转告用户） */
+  /** 给主 session agent 的通知（按 task_type 差异化指令，agent 处理后回复用户） */
   function buildAgentNotification(t: any): string {
     const msg = t.message ?? "";
-    return [
-      `[ClawMeeting ${t.task_type}]`,
-      msg,
-      "",
-      "请将以上会议通知的完整信息转告用户，包括所有细节（会议名称、时间、时长、会议链接等），不要省略任何信息。",
+    const taskType = t.task_type;
+    const header = `[ClawMeeting ${taskType}]`;
+
+    // 通用规则：用用户的语言回复，保留所有字段不省略
+    const langRule = "Reply in the user's language (detect from conversation history). Do NOT omit any fields from the notification.";
+
+    if (taskType === "MEETING_CONFIRMED") {
+      return [header, msg, "",
+        `Instruction: Present this confirmation to the user. Include ALL details: meeting title, confirmed time, duration, organizer, participants, and meeting link (if present). Format it clearly. ${langRule}`,
+      ].join("\n");
+    }
+    if (taskType === "MEETING_OVER") {
+      return [header, msg, "",
+        `Instruction: Inform the user this meeting has been cancelled. Include the meeting title, reason (if provided), and who cancelled. ${langRule}`,
+      ].join("\n");
+    }
+    if (taskType === "COUNTER_PROPOSAL") {
+      return [header, msg, "",
+        [
+          "Instruction: The coordinator has sent a compromise proposal. This REQUIRES the user's decision.",
+          "1. Present ALL details: meeting title, proposed time slots, coordinator's reasoning.",
+          "2. Clearly ask the user to choose: Accept / Propose new times / Reject.",
+          "3. Wait for the user's explicit decision before taking any action.",
+          "4. When submitting, ALWAYS include preference_note with user's reasoning.",
+          langRule,
+        ].join(" "),
+      ].join("\n");
+    }
+    if (taskType === "MEETING_FAILED") {
+      return [header, msg, "",
+        [
+          "Instruction: Meeting negotiation has failed. This REQUIRES the user's decision.",
+          "1. Present the failure reason and meeting details.",
+          "2. Clearly tell the user they have TWO options:",
+          "   a) Cancel this meeting entirely.",
+          "   b) Modify parameters and retry — explicitly list ALL changeable params: available_slots, duration_minutes, invitees.",
+          "3. Wait for the user's explicit choice. Do NOT proceed without it.",
+          langRule,
+        ].join(" "),
+      ].join("\n");
+    }
+    // 其他类型：通用转告
+    return [header, msg, "",
+      `Instruction: Relay this notification to the user. Preserve all fields and details exactly. ${langRule}`,
     ].join("\n");
   }
 

@@ -137,16 +137,19 @@ function buildInitialSubmitInfo(task: PendingTask): object {
       "Follow this exact order: ",
       "Step 1: Check if the user has a connected calendar. If yes, you MUST query it to get their real schedule. ",
       "Step 2: Check your memory for schedule info the user mentioned (business trips, doctor appointments, picking up kids, dinner plans, etc.) and meeting preferences. ",
-      "Step 3: If calendar or memory provides schedule info, combine them with the organizer's proposed slots to select suitable times, ",
+      "Step 3: If calendar or memory provides schedule info, combine them with the organizer's proposed slots to select CONCRETE time slots, ",
       "then call this tool to submit: meeting_id, response_type='INITIAL', available_slots, preference_note. ",
-      "【Important】If you handled this entirely by yourself (user was NOT asked), you MUST prefix preference_note with '[auto]'. ",
-      "Example: preference_note='[auto] 根据日历和记忆自动安排，周三下午有空'. ",
+      "【Critical - available_slots is MANDATORY】available_slots must contain concrete time ranges (e.g. '2026-04-01 14:00-17:00'). ",
+      "Verbal confirmations like '可以参加', 'I'm free', '没问题' are NOT time slots. ",
+      "If the user only gives verbal confirmation without specific times, you MUST ask: 'What specific time slots are you available?' ",
+      "NEVER submit with empty available_slots. NEVER put time info only in preference_note — it MUST be in available_slots. ",
       "After successful submission, briefly inform the user: which meeting was received, what times you submitted, and why. ",
       "Step 4: If you have NO connected calendar AND your memory has NO schedule info at all, ",
       "then ask the user for their available times before submitting. ",
-      "【Critical】Always fill in preference_note with any scheduling constraints, preferences, or context. ",
-      "If the user provided input directly, do NOT add [auto] prefix. ",
-      "Examples: '下午有课，只有上午有空', '出差中，只能线上'. Only fill it when relevant; omit it otherwise.",
+      "【preference_note rules】Always fill in preference_note with any scheduling constraints, preferences, or context. ",
+      "Examples: '下午有课，只有上午有空', '出差中，只能线上', '只能待30分钟', '建议改成线上', '让xxx代替参加'. ",
+      "Only fill it when the user expressed something relevant; omit it otherwise. ",
+      "Reply in the user's language (detect from conversation history).",
     ].join(""),
   };
 }
@@ -189,7 +192,8 @@ function buildCounterProposalInfo(task: PendingTask): object {
       "  - New proposal: preference_note='周三有课，只能周四' ",
       "  - Reject: preference_note='这周出差，无法参加' ",
       "  - ANY structural suggestion: preference_note='时间太长了，建议改成30分钟' or '建议把小王也加上' ",
-      "This field is critical for the coordinator agent to understand everyone's real constraints. Only fill it when the user expressed something relevant; omit it if the user has no additional context.",
+      "This field is critical for the coordinator agent to understand everyone's real constraints. Only fill it when the user expressed something relevant; omit it if the user has no additional context. ",
+      "Reply in the user's language (detect from conversation history).",
     ].join("\n"),
   };
 }
@@ -229,7 +233,8 @@ function buildFailedInfo(task: PendingTask): object {
       "  - Retry → ask the user which parameters they want to change, then call this tool with: ",
       "    meeting_id + response_type='INITIAL' + available_slots (required), ",
       "    and optionally duration_minutes and/or invitees if the user wants to change them. ",
-      "Do NOT proceed without the user's explicit choice.",
+      "Do NOT proceed without the user's explicit choice. ",
+      "Reply in the user's language (detect from conversation history).",
     ].join(""),
   };
 }
