@@ -370,6 +370,9 @@ export default function register(api: any) {
           "2. Clearly ask the user to choose: Accept / Propose new times / Reject.",
           "3. Wait for the user's explicit decision before taking any action.",
           "4. When submitting, ALWAYS include preference_note with user's reasoning.",
+          "5. CRITICAL: When the user replies with a decision (accept/reject/cancel/new times), you MUST call check_and_respond_tasks to execute it.",
+          "   '取消'/'拒绝'/'不参加'/'cancel' → response_type=REJECT. '接受'/'同意'/'accept' → response_type=ACCEPT_PROPOSAL.",
+          "   Do NOT just acknowledge verbally — always call the tool.",
           langRule,
         ].join(" "),
       ].join("\n");
@@ -383,6 +386,8 @@ export default function register(api: any) {
           "   a) Cancel this meeting entirely.",
           "   b) Modify parameters and retry — explicitly list ALL changeable params: available_slots, duration_minutes, invitees.",
           "3. Wait for the user's explicit choice. Do NOT proceed without it.",
+          "4. CRITICAL: When the user replies with a decision, you MUST call check_and_respond_tasks to execute it.",
+          "   '取消'/'算了'/'不开了'/'cancel' → response_type=REJECT. Never just acknowledge verbally — always call the tool.",
           langRule,
         ].join(" "),
       ].join("\n");
@@ -558,8 +563,9 @@ export default function register(api: any) {
     console.log(`[CM:queue] === 开始处理队列，共 ${taskQueue.length} 条 ===`);
     const now = Date.now();
 
-    // 逐条处理（取第一条，处理完再取下一条）
-    while (taskQueue.length > 0) {
+    // 每轮只处理一条，5s 后 setInterval 自动处理下一条
+    // 避免 agent 合并处理多条通知导致后续 reply 为空
+    {
       const item = taskQueue[0];
       const t = item.task;
       const meetingId = t.meeting_id;
@@ -598,8 +604,8 @@ export default function register(api: any) {
 
         notifiedMeetings.add(`${meetingId}:${taskType}`);
         saveNotifiedMeetings([...notifiedMeetings]);
-        continue;
-      }
+        // Offline 处理完不 return，让下面 isProcessingQueue = false 执行
+      } else {
 
       // ---- 正常处理：sessions_send → 提取 reply → message tool 分发 ----
       console.log(`[CM:queue] 处理: ${taskType}(${meetingId?.slice(-8)}) 「${title}」 retry=${item.retryCount} age=${Math.round(ageMs / 1000)}s`);
@@ -607,16 +613,15 @@ export default function register(api: any) {
       const { ok: mainOk, reply } = await sendViaSessionsSend(item.agentMsg);
 
       if (!mainOk) {
+        // ---- sessions_send 失败 ----
         item.retryCount++;
         if (item.retryCount >= MAX_RETRY) {
           console.error(`[CM:queue] 超过最大重试次数(${MAX_RETRY})，fallback: ${taskType}(${meetingId?.slice(-8)})`);
           taskQueue.shift();
-          // INITIAL_SUBMIT 是 agent 静默处理，失败时不推给用户（用户不需要知道这个中间状态）
           if (taskType === "INITIAL_SUBMIT") {
             console.log(`[CM:queue] INITIAL_SUBMIT 失败，不推送到用户渠道，等下次轮询重新入队`);
-            submittedMeetings.delete(meetingId); // 允许下次轮询重新发现
+            submittedMeetings.delete(meetingId);
           } else {
-            // 其他类型：仅当 directMsg 有实质内容时才推送
             const taskMsg = item.task?.message ?? "";
             if (taskMsg.trim()) {
               pendingNotifications.push(item.directMsg);
@@ -632,36 +637,34 @@ export default function register(api: any) {
           }
         } else {
           console.log(`[CM:queue] sessions_send 失败，留在队列等下次重试 (retry=${item.retryCount}/${MAX_RETRY})`);
-          break; // 不再处理后续任务，等下一轮
         }
-        continue;
-      }
+      } else {
+        // ---- sessions_send 成功，移出队列 ----
+        taskQueue.shift();
+        console.log(`[CM:queue] sessions_send 成功`);
 
-      // sessions_send 成功，移出队列
-      taskQueue.shift();
-      console.log(`[CM:queue] sessions_send 成功`);
-
-      // INITIAL_SUBMIT：有 reply 说明 agent 需要用户决策（如冲突），推到额外渠道；无 reply 说明静默处理完成，不推
-      if (taskType === "INITIAL_SUBMIT" && !reply) {
-        console.log(`[CM:queue] INITIAL_SUBMIT 静默处理完成（reply=无），不推送到额外渠道`);
-      } else if (extraChannels.size > 0) {
-        // 其他类型：提取 reply → message tool 分发到额外渠道
-        const taskMsg = item.task?.message ?? "";
-        const channelMsg = reply || (taskMsg.trim() ? item.directMsg : "");
-        if (!channelMsg) {
-          console.log(`[CM:queue] reply=无 且 t.message=空，跳过额外渠道推送`);
-        } else {
-          const source = reply ? "agent reply" : "directFallback";
-          for (const [chName, chCtx] of extraChannels) {
-            const target = parseChannelTarget(chCtx.sessionKey);
-            if (target) {
-              console.log(`[CM:queue] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
-              await sendViaMessageTool(target.channel, target.target, channelMsg);
+        // INITIAL_SUBMIT：有 reply 说明 agent 需要用户决策（如冲突），推到额外渠道；无 reply 说明静默处理完成，不推
+        if (taskType === "INITIAL_SUBMIT" && !reply) {
+          console.log(`[CM:queue] INITIAL_SUBMIT 静默处理完成（reply=无），不推送到额外渠道`);
+        } else if (extraChannels.size > 0) {
+          const taskMsg = item.task?.message ?? "";
+          const channelMsg = reply || (taskMsg.trim() ? item.directMsg : "");
+          if (!channelMsg) {
+            console.log(`[CM:queue] reply=无 且 t.message=空，跳过额外渠道推送`);
+          } else {
+            const source = reply ? "agent reply" : "directFallback";
+            for (const [chName, chCtx] of extraChannels) {
+              const target = parseChannelTarget(chCtx.sessionKey);
+              if (target) {
+                console.log(`[CM:queue] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
+                await sendViaMessageTool(target.channel, target.target, channelMsg);
+              }
             }
           }
         }
       }
-    }
+      } // close else (normal processing, not offline)
+    } // close single-item block
 
     console.log(`[CM:queue] === 队列处理完成，剩余 ${taskQueue.length} 条 ===`);
     isProcessingQueue = false;
@@ -1022,6 +1025,14 @@ export default function register(api: any) {
             "  这是协商失败通知。完整展示失败原因，并询问用户：",
             "  1. 取消会议 → call check_and_respond_tasks with response_type='REJECT'",
             "  2. 调整时间重试 → 用户提供新时段，call response_type='NEW_PROPOSAL' + available_slots",
+            "",
+            "[ClawMeeting CRITICAL RULE — Tool Execution Required]",
+            "When the user makes ANY decision about a meeting (accept, reject, cancel, retry, new times),",
+            "you MUST call check_and_respond_tasks to execute it. NEVER just acknowledge verbally.",
+            "Keyword mapping: '取消'/'算了'/'拒绝'/'不参加'/'cancel' → REJECT.",
+            "'接受'/'同意'/'可以'/'accept' → ACCEPT_PROPOSAL.",
+            "'换个时间'/'重试'/'retry' → ask user for new slots, then NEW_PROPOSAL.",
+            "If in doubt, call the tool. A verbal-only response is ALWAYS wrong for meeting decisions.",
             "- On [ClawMeeting MEETING_CONFIRMED]:",
             "  这是会议确认通知。请将通知中的所有信息完整展示给用户：",
             "  会议名称、确认时间、时长、会议链接（如有）。不要省略任何细节，不要简化。",
