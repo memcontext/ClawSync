@@ -107,7 +107,7 @@ export default function register(api: any) {
       console.log("[CM:init] sessions_send 已在 gateway.tools.allow ✅");
     }
   }
-  ensureToolAllowlist();
+  // ensureToolAllowlist() 在 gateway_start 时调用，避免 gateway 未就绪时 fetch 失败
 
   const PLUGIN_ID = readPluginId();
 
@@ -806,6 +806,8 @@ export default function register(api: any) {
   api.on?.(
     "gateway_start",
     () => {
+      // gateway 完全就绪后再检查 sessions_send allowlist
+      ensureToolAllowlist();
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
