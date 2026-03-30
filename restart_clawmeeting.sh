@@ -9,7 +9,7 @@
 #   bash restart_clawmeeting.sh --all    拉取代码 + 清库 + 重启
 # =========================================
 
-BASE_DIR="/home/deploy/ClawMeeting"
+BASE_DIR="/home/deploy/clawmeeting"
 API_DIR="$BASE_DIR/api-server"
 AGENT_DIR="$BASE_DIR/agent/agent"
 API_PORT=7010
@@ -38,9 +38,8 @@ if [ "$DO_PULL" = true ]; then
     echo "📥 拉取最新代码..."
     cd $BASE_DIR
     git stash 2>/dev/null
-    rm -f agent/agent/agent_runner.py 2>/dev/null
     git pull origin main
-    git checkout origin/main -- agent/agent/agent_runner.py
+    git stash pop 2>/dev/null
     echo "✅ 代码已更新"
 fi
 
@@ -82,10 +81,12 @@ fi
 echo ""
 echo "🚀 启动 Agent (端口 $AGENT_PORT)..."
 cd $AGENT_DIR
-source venv/bin/activate 2>/dev/null
-nohup python agent_runner.py > agent.log 2>&1 &
+# 杀掉可能残留的旧 Agent 进程
+ps -ef | grep agent_runner.py | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null
+sleep 1
+nohup $AGENT_DIR/venv/bin/python -u agent_runner.py > agent.log 2>&1 &
 AGENT_PID=$!
-sleep 2
+sleep 3
 
 if lsof -i :$AGENT_PORT > /dev/null 2>&1; then
     echo "  ✅ Agent 启动成功 (PID: $AGENT_PID)"
