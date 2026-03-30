@@ -411,8 +411,7 @@ async def submit_availability(
 
                 # 更新发起人的时间
                 negotiation_log.latest_slots = submit_data.available_slots
-                if submit_data.preference_note:
-                    negotiation_log.preference_note = submit_data.preference_note
+                negotiation_log.preference_note = submit_data.preference_note  # 无条件覆盖，清除旧备注
                 negotiation_log.action_required = False
                 negotiation_log.counter_proposal_message = None
                 negotiation_log.updated_at = datetime.utcnow()
@@ -493,6 +492,7 @@ async def submit_availability(
                     if log.user_id != current_user.id:
                         log.action_required = True
                         log.latest_slots = []
+                        log.preference_note = None  # 清除旧备注，防止残留触发误判
                         if not log.counter_proposal_message:  # 新增参与者已有消息
                             log.counter_proposal_message = notify_msg
                         log.suggested_slots = None
