@@ -80,8 +80,34 @@ export default function register(api: any) {
   }
   _registered = true;
 
-  const PKG_VERSION = "1.0.29";
+  const PKG_VERSION = "1.0.32";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
+
+  // ============================================================
+  // 0. 自动确保 sessions_send 在 gateway.tools.allow 中
+  // ============================================================
+  function ensureToolAllowlist() {
+    const gatewayTools = api.config?.gateway?.tools;
+    const allow: string[] = gatewayTools?.allow ?? [];
+    if (!allow.includes("sessions_send")) {
+      console.log("[CM:init] sessions_send 不在 gateway.tools.allow，尝试自动添加...");
+      const port = api.config?.gateway?.port ?? 18789;
+      const token = api.config?.gateway?.auth?.token ?? process.env.OPENCLAW_GATEWAY_TOKEN ?? "";
+      fetch(`http://127.0.0.1:${port}/config/patch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        body: JSON.stringify({ path: "gateway.tools", value: { allow: [...allow, "sessions_send"] } }),
+      }).then(res => {
+        if (res.ok) console.log("[CM:init] ✅ 已自动将 sessions_send 加入 gateway.tools.allow");
+        else console.warn("[CM:init] ⚠️ 自动配置失败，需手动添加 gateway.tools.allow: ['sessions_send']");
+      }).catch(err => {
+        console.warn(`[CM:init] ⚠️ 自动配置异常: ${(err as Error)?.message}`);
+      });
+    } else {
+      console.log("[CM:init] sessions_send 已在 gateway.tools.allow ✅");
+    }
+  }
+  ensureToolAllowlist();
 
   const PLUGIN_ID = readPluginId();
 
@@ -958,7 +984,10 @@ export default function register(api: any) {
 
       if (isMainSession) {
         // 主 session 捕获（webchat）
-        const isWebchat = !channel || WEBCHAT_CHANNELS.has(channel);
+        // channel 为 null 时从 sessionKey 解析渠道名，防止飞书/Telegram 的 before_prompt_build 不传 channel 时污染主 session
+        const channelFromKey = sessionKey.split(":")[2] ?? "";
+        const effectiveChannel = channel || channelFromKey;
+        const isWebchat = !effectiveChannel || WEBCHAT_CHANNELS.has(effectiveChannel);
         if (isWebchat && (sessionKey !== sessionCtx?.sessionKey || channel !== sessionCtx?.channel)) {
           const oldKey = sessionCtx.sessionKey;
           sessionCtx = { sessionKey, channel };
