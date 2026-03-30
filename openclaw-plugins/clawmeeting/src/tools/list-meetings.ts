@@ -14,7 +14,8 @@ import type { ClawMeetingApiClient } from "../utils/api-client.js";
 export const listMeetingsSchema = {
   name: "list_meetings",
   description: [
-    "View the user's meeting list or details of a specific meeting.",
+    "[ClawMeeting Plugin Tool] View the user's meeting list or details of a specific meeting.",
+    "IMPORTANT: Always use this tool to view meetings — never call any external API directly.",
     "",
     "Mode A - No meeting_id: Returns all meetings the user is involved in (initiated and invited), sorted by creation time (newest first).",
     "Mode B - With meeting_id: Returns detailed info for that meeting, including participant status, coordinator reasoning, etc.",

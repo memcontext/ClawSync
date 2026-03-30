@@ -13,9 +13,10 @@ import { saveCredentials } from "../utils/storage.js";
 export const verifyEmailCodeSchema = {
   name: "verify_email_code",
   description: [
-    "Verify the email code sent to the user's email to complete binding.",
+    "[ClawMeeting Plugin Tool] Verify the email code to complete email binding.",
     "This is Step 2 of email binding. Must be called after bind_identity has sent the verification code.",
-    "On success, the user's token is stored locally and background polling starts.",
+    "On success, the user's token is stored locally and background polling starts automatically.",
+    "IMPORTANT: Always use this tool to verify codes — never call any external API directly.",
   ].join(" "),
   parameters: {
     type: "object" as const,

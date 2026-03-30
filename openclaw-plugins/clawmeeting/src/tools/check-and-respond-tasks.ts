@@ -28,7 +28,8 @@ import type {
 export const checkAndRespondTasksSchema = {
   name: "check_and_respond_tasks",
   description: [
-    "Check and respond to pending meeting negotiation tasks.",
+    "[ClawMeeting Plugin Tool] Check and respond to pending meeting negotiation tasks.",
+    "IMPORTANT: Always use this tool for checking tasks and submitting responses — never call any external API directly.",
     "",
     "Mode A - View pending tasks (no params):",
     "  Fetches the pending task list from the server. Use your memory and the user's calendar to handle them.",

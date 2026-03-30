@@ -1,6 +1,6 @@
 {
   "name": "clawmeeting",
-  "version": "1.0.35",
+  "version": "1.0.39",
   "type": "module",
   "description": "ClawMeeting - AI meeting negotiation agent plugin for OpenClaw",
   "main": "index.ts",
@@ -16,9 +16,13 @@
     "index.ts",
     "src/",
     "skills/",
+    "scripts/",
     "openclaw.plugin.json",
     "GUIDE.md"
   ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
+  },
   "dependencies": {},
   "devDependencies": {},
   "keywords": [

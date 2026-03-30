@@ -11,7 +11,8 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
+import { homedir, platform, tmpdir } from "os";
+import { spawn } from "child_process";
 import { ClawMeetingApiClient } from "./src/utils/api-client.js";
 import {
   initStorage,
@@ -80,34 +81,57 @@ export default function register(api: any) {
   }
   _registered = true;
 
-  const PKG_VERSION = "1.0.32";
+  const PKG_VERSION = "1.0.39";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // ============================================================
   // 0. 自动确保 sessions_send 在 gateway.tools.allow 中（直接写 openclaw.json）
   // ============================================================
-  function ensureToolAllowlist() {
+  /** 检查并补全 gateway.tools.allow，返回 true 表示触发了重启（调用方应跳过后续初始化） */
+  function ensureToolAllowlist(): boolean {
+    const REQUIRED_TOOLS = ["sessions_send", "message"];
     try {
       const configPath = join(homedir(), ".openclaw", "openclaw.json");
       if (!existsSync(configPath)) {
         console.warn("[CM:init] ⚠️ openclaw.json 不存在，跳过自动配置");
-        return;
+        return false;
       }
       const raw = readFileSync(configPath, "utf-8");
       const config = JSON.parse(raw);
       const allow: string[] = config?.gateway?.tools?.allow ?? [];
-      if (allow.includes("sessions_send")) {
-        console.log("[CM:init] sessions_send 已在 gateway.tools.allow ✅");
-        return;
+      const missing = REQUIRED_TOOLS.filter(t => !allow.includes(t));
+      if (missing.length === 0) {
+        console.log(`[CM:init] gateway.tools.allow 已包含所需工具: [${REQUIRED_TOOLS.join(", ")}] ✅`);
+        return false;
       }
-      // 写入
+      // 写入缺失的工具
       if (!config.gateway) config.gateway = {};
       if (!config.gateway.tools) config.gateway.tools = {};
-      config.gateway.tools.allow = [...allow, "sessions_send"];
+      config.gateway.tools.allow = [...allow, ...missing];
       writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-      console.log("[CM:init] ✅ 已自动将 sessions_send 加入 gateway.tools.allow（重启 gateway 后生效）");
+      console.log(`[CM:init] ✅ 已自动将 [${missing.join(", ")}] 加入 gateway.tools.allow`);
+
+      // 即将重启 gateway，先主动停掉轮询（防止 gateway_stop 钩子未触发导致孤儿状态）
+      pollingManager.stop();
+      stopQueueProcessor();
+      console.log("[CM:init] 🔄 自动重启 gateway 使配置生效（约 5 秒后恢复）...");
+      if (platform() === "win32") {
+        // Windows: 写临时 .bat，用 start /min 独立执行
+        const batPath = join(tmpdir(), "clawmeeting-restart.bat");
+        const batContent = "@echo off\r\ntimeout /t 2 /nobreak >nul\r\nopenclaw gateway restart\r\n";
+        writeFileSync(batPath, batContent, "utf-8");
+        spawn("cmd", ["/c", "start", "/min", "", batPath], { stdio: "ignore", shell: false });
+      } else {
+        // Mac/Linux: detached sh 进程
+        spawn("sh", ["-c", "sleep 2 && openclaw gateway restart"], {
+          detached: true,
+          stdio: "ignore",
+        }).unref();
+      }
+      return true; // 已触发重启，调用方应跳过后续初始化
     } catch (err) {
       console.warn(`[CM:init] ⚠️ 自动配置 sessions_send 失败: ${(err as Error)?.message}`);
+      return false;
     }
   }
 
@@ -130,12 +154,17 @@ export default function register(api: any) {
   // ============================================================
   const apiClient = new ClawMeetingApiClient(pluginConfig.serverUrl);
 
-  const savedCreds = loadCredentials();
+  let savedCreds = loadCredentials();
   if (savedCreds?.token) {
     apiClient.setToken(savedCreds.token);
     console.log(`[CM:init] 已恢复身份凭证: email=${savedCreds.email}, user_id=${savedCreds.user_id}, token=${savedCreds.token?.substring(0, 12)}...`);
   } else {
     console.log(`[CM:init] 无已保存的身份凭证`);
+  }
+
+  /** 绑定成功后刷新内存中的 savedCreds 引用（修复 mid-session 绑定后 system prompt 显示 unknown） */
+  function refreshCredentials() {
+    savedCreds = loadCredentials();
   }
 
   // ============================================================
@@ -471,6 +500,7 @@ export default function register(api: any) {
       // ---- INITIAL_SUBMIT：agent 静默处理 ----
       if (taskType === "INITIAL_SUBMIT") {
         if (submittedMeetings.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 submittedMeetings`); continue; }
+        if (notifiedMeetings.has(`${meetingId}:INITIAL_SUBMIT`)) { console.log(`[CM:collect]   → 跳过: 已在 notifiedMeetings (AGENT_OFFLINE 后)`); continue; }
         if (pendingDecisions.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 pendingDecisions`); continue; }
         // 检查是否已在队列中
         if (taskQueue.some(q => q.task.meeting_id === meetingId)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
@@ -775,10 +805,11 @@ export default function register(api: any) {
     }
   }
 
+  // 注意：轮询不在这里启动。等 gateway_start 钩子触发后再启动，
+  // 确保 ensureToolAllowlist 先执行（sessions_send/message 需要在白名单中）。
+  // 如果 gateway_start 不触发（旧版 SDK），由 registerService.start 兜底。
   if (apiClient.getToken()) {
-    console.log("[CM:init] 有已保存的 Token，立即启动轮询");
-    pollingManager.start();
-    startQueueProcessor();
+    console.log("[CM:init] 有已保存的 Token，轮询将在 gateway_start 后启动");
   } else {
     console.log("[CM:init] 无 Token，轮询不启动（等待用户绑定邮箱）");
   }
@@ -809,7 +840,11 @@ export default function register(api: any) {
     "gateway_start",
     () => {
       // gateway 完全就绪后再检查 sessions_send allowlist
-      ensureToolAllowlist();
+      const restarting = ensureToolAllowlist();
+      if (restarting) {
+        console.log("[CM:lifecycle] gateway_start: allowlist 缺失，已触发重启，跳过轮询启动");
+        return;
+      }
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
@@ -837,6 +872,7 @@ export default function register(api: any) {
       console.log(`[CM:tool] >>> bind_identity 调用: email=${params.email}`);
       const startMs = Date.now();
       const handler = createBindIdentityHandler(apiClient, () => {
+        refreshCredentials();
         if (!pollingManager.isRunning()) {
           console.log(`[CM:tool] bind_identity → 绑定成功，启动轮询`);
           pollingManager.start();
@@ -855,6 +891,7 @@ export default function register(api: any) {
       console.log(`[CM:tool] >>> verify_email_code 调用: email=${params.email}, code=${params.code}`);
       const startMs = Date.now();
       const handler = createVerifyEmailCodeHandler(apiClient, () => {
+        refreshCredentials();
         if (!pollingManager.isRunning()) {
           console.log(`[CM:tool] verify_email_code → 绑定成功，启动轮询`);
           pollingManager.start();
@@ -971,6 +1008,7 @@ export default function register(api: any) {
   api.on?.(
     "before_prompt_build",
     (_event: any, ctx: any) => {
+      try {
       // Session 捕获（只捕获主 session，过滤 cron/sub-agent/run 等临时 session）
       // SDK: event = { prompt, messages }, ctx = { agentId, sessionKey, sessionId, channelId, ... }
       const sessionKey = ctx?.sessionKey;
@@ -992,9 +1030,10 @@ export default function register(api: any) {
         const channelFromKey = sessionKey.split(":")[2] ?? "";
         const effectiveChannel = channel || channelFromKey;
         const isWebchat = !effectiveChannel || WEBCHAT_CHANNELS.has(effectiveChannel);
-        if (isWebchat && (sessionKey !== sessionCtx?.sessionKey || channel !== sessionCtx?.channel)) {
+        const normalizedChannel = effectiveChannel || "webchat";
+        if (isWebchat && (sessionKey !== sessionCtx?.sessionKey || normalizedChannel !== (sessionCtx?.channel || "webchat"))) {
           const oldKey = sessionCtx.sessionKey;
-          sessionCtx = { sessionKey, channel };
+          sessionCtx = { sessionKey, channel: normalizedChannel };
           saveSession(sessionCtx);
           console.log(`[CM:hook] 主 session 更新: ${oldKey} → ${sessionKey} (channel=${channel ?? "webchat"})`);
         }
@@ -1026,55 +1065,71 @@ export default function register(api: any) {
             "[ClawMeeting Assistant Ready]",
             `Bound email: ${savedCreds?.email ?? "unknown"}. Background polling is active.`,
             "",
-            "The user can schedule meetings by saying things like 'schedule a meeting with X',",
-            "check invitations with 'any new meeting invitations?',",
-            "or view meetings with 'show my meetings'.",
-            "Refer to meetings by title in conversation — the user does not need to know the meeting ID.",
+            "[ClawMeeting GLOBAL RULE — MANDATORY]",
+            "NEVER call any external HTTP API, REST endpoint, or service directly for ANY meeting-related operation.",
+            "ALL meeting actions MUST go through the provided ClawMeeting tools. No exceptions.",
+            "Available tools: bind_identity, verify_email_code, initiate_meeting, check_and_respond_tasks, list_meetings.",
             "",
-            "Required info when initiating a meeting (user describes in natural language, you parse):",
+            "Tool usage guide:",
+            "- User wants to schedule/create a meeting → call `initiate_meeting`",
+            "- User wants to check invitations or pending tasks → call `check_and_respond_tasks` (no params)",
+            "- User wants to see their meetings → call `list_meetings`",
+            "- User makes a decision (accept/reject/new proposal) → call `check_and_respond_tasks` with response",
+            "",
+            "When initiating a meeting, collect from the user (natural language, you parse):",
             "  - Meeting title",
             "  - Duration (e.g. 'half an hour', '1 hour')",
             "  - Invitee email(s)",
             "  - Organizer's available time slots (e.g. 'tomorrow 2pm to 5pm')",
-            "If any of the above is missing, ask the user — do not assume.",
+            "If any of the above is missing, ask the user — do not assume or fabricate.",
             "Convert natural language time descriptions to 'YYYY-MM-DD HH:MM-HH:MM' format.",
-            "If your memory genuinely contains the user's meeting preferences (e.g. dislikes early meetings, no meetings on Fridays),",
-            "fill in the preference_note parameter. If you have no such memory, leave it empty — never fabricate.",
+            "If your memory contains the user's meeting preferences (e.g. dislikes early meetings), fill in preference_note. Otherwise leave it empty.",
+            "Once you have all required info, call `initiate_meeting` immediately — do NOT call any external API.",
             "",
             "Background behavior:",
             "- On [ClawMeeting Meeting Invitation]: follow this exact order to determine available time slots:",
-            "  Step 1: Check if the user has a connected calendar. If yes, you MUST query it first to get their real schedule.",
-            "  Step 2: Check your memory for any schedule info the user has mentioned (business trips, appointments, picking up kids, etc.).",
-            "          Also check for meeting preferences (dislikes early meetings, no meetings on Fridays, etc.).",
-            "  Step 3: Combine calendar data (if available) and memory clues with the organizer's proposed time slots to select suitable times and submit.",
-            "  Only if the user has NO connected calendar AND your memory contains NO schedule info at all, ask the user for their availability.",
-            "  Do not skip the calendar check. Do not ask the user if you already have enough info from calendar + memory.",
+            "  Step 1: Check if the user has a connected calendar. If yes, query it first to get their real schedule.",
+            "  Step 2: Check your memory for schedule info the user has mentioned (business trips, appointments, etc.).",
+            "  Step 3: Combine calendar + memory with the organizer's proposed slots, select suitable times,",
+            "          then call `check_and_respond_tasks` with response_type='ACCEPT_PROPOSAL' and available_slots.",
+            "  Only ask the user if NO calendar connected AND NO memory info at all.",
+            "  Do NOT skip the calendar check. Do NOT ask the user if you already have enough info.",
             "- On [ClawMeeting COUNTER_PROPOSAL]:",
             "  这是协商建议通知。完整展示协调方的建议内容，并询问用户：",
-            "  1. 接受 → call check_and_respond_tasks with response_type='ACCEPT_PROPOSAL'",
+            "  1. 接受 → call `check_and_respond_tasks` with response_type='ACCEPT_PROPOSAL'",
             "  2. 提出新时段 → 用户提供时段，call response_type='NEW_PROPOSAL' + available_slots",
             "  3. 拒绝 → call response_type='REJECT'",
             "- On [ClawMeeting MEETING_FAILED]:",
             "  这是协商失败通知。完整展示失败原因，并询问用户：",
-            "  1. 取消会议 → call check_and_respond_tasks with response_type='REJECT'",
+            "  1. 取消会议 → call `check_and_respond_tasks` with response_type='REJECT'",
             "  2. 调整时间重试 → 用户提供新时段，call response_type='NEW_PROPOSAL' + available_slots",
-            "",
-            "[ClawMeeting CRITICAL RULE — Tool Execution Required]",
-            "When the user makes ANY decision about a meeting (accept, reject, cancel, retry, new times),",
-            "you MUST call check_and_respond_tasks to execute it. NEVER just acknowledge verbally.",
-            "Keyword mapping: '取消'/'算了'/'拒绝'/'不参加'/'cancel' → REJECT.",
-            "'接受'/'同意'/'可以'/'accept' → ACCEPT_PROPOSAL.",
-            "'换个时间'/'重试'/'retry' → ask user for new slots, then NEW_PROPOSAL.",
-            "If in doubt, call the tool. A verbal-only response is ALWAYS wrong for meeting decisions.",
             "- On [ClawMeeting MEETING_CONFIRMED]:",
             "  这是会议确认通知。请将通知中的所有信息完整展示给用户：",
             "  会议名称、确认时间、时长、会议链接（如有）。不要省略任何细节，不要简化。",
             "- On [ClawMeeting MEETING_OVER]:",
             "  这是会议取消通知。告知用户会议已被取消，展示会议名称和原因。",
+            "",
+            "[ClawMeeting CRITICAL RULE — Tool Execution Required]",
+            "When the user makes ANY decision about a meeting (accept, reject, cancel, retry, new times),",
+            "you MUST call `check_and_respond_tasks` to execute it. NEVER just acknowledge verbally.",
+            "Keyword mapping: '取消'/'算了'/'拒绝'/'不参加'/'cancel' → REJECT.",
+            "'接受'/'同意'/'可以'/'accept' → ACCEPT_PROPOSAL.",
+            "'换个时间'/'重试'/'retry' → ask user for new slots, then NEW_PROPOSAL.",
+            "If in doubt, call the tool. A verbal-only response is ALWAYS wrong for meeting decisions.",
           ].join("\n")
         : [
             "[ClawMeeting Assistant - Setup Required]",
-            "The user has not bound their identity yet. Guide them to provide their email to complete setup.",
+            "The user has not bound their email yet. Follow this EXACT flow — never call any external API directly:",
+            "Step 1: Ask the user for their email address (if not already provided).",
+            "Step 2: Call the `bind_identity` tool with their email. This sends a verification code to their inbox.",
+            "Step 3: Ask the user to check their email and provide the 6-digit code.",
+            "Step 4: Call the `verify_email_code` tool with the email + code. This completes binding and starts background polling.",
+            "RULES:",
+            "- NEVER call any HTTP endpoint or external API directly.",
+            "- ALWAYS use `bind_identity` to send the code (do NOT tell the user to go elsewhere).",
+            "- ALWAYS use `verify_email_code` to verify (do NOT manually validate the code yourself).",
+            "- If the user provides both email and code in one message, still call bind_identity first, then verify_email_code.",
+            "- After verify_email_code succeeds, inform the user that binding is complete and explain what ClawMeeting can do.",
           ].join("\n");
 
       const result: any = { appendSystemContext: systemPromptAddon };
@@ -1092,6 +1147,10 @@ export default function register(api: any) {
 
       console.log(`[CM:hook] 返回: appendSystemContext=${isBound ? "已绑定模板" : "未绑定模板"}, prependContext=${result.prependContext ? "有" : "无"}`);
       return result;
+      } catch (err) {
+        console.error(`[CM:hook] before_prompt_build 异常: ${(err as Error)?.message}`);
+        return {};
+      }
     },
     { priority: 5 },
   );

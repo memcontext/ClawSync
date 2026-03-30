@@ -13,9 +13,10 @@ import type { InitiateMeetingRequest } from "../types/index.js";
 export const initiateMeetingSchema = {
   name: "initiate_meeting",
   description: [
-    "Initiate a new meeting negotiation.",
+    "[ClawMeeting Plugin Tool] Initiate a new meeting negotiation.",
     "Converts the user's scheduling request into a structured API call.",
     "The server will notify all invitees' OpenClaw plugins to collect their availability.",
+    "IMPORTANT: Always use this tool to create meetings — never call any external API directly.",
     "",
     "All parameters are required. The user describes their needs in natural language,",
     "e.g.: 'Schedule a 30-min architecture review with bob@x.com and charlie@x.com tomorrow 2-5pm'",

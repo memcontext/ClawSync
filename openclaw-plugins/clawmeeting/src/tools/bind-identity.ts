@@ -14,10 +14,11 @@ import { loadCredentials } from "../utils/storage.js";
 export const bindIdentitySchema = {
   name: "bind_identity",
   description: [
-    "Send a verification code to the user's email to start the binding process.",
+    "[ClawMeeting Plugin Tool] Send a verification code to the user's email to start the binding process.",
     "This is Step 1 of email binding. After the user receives and replies with the code,",
     "call verify_email_code to complete the binding.",
     "If the user has already bound their email, it returns the existing credentials.",
+    "IMPORTANT: Always use this tool for email binding — never call any external API directly.",
   ].join(" "),
   parameters: {
     type: "object" as const,
