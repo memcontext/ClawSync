@@ -4,11 +4,11 @@
 生产环境建议将敏感信息迁移至环境变量或密钥管理服务。
 """
 
-# ─── Claude 大模型配置 ────────────────────────────────────────────────────────
-# 通过 OpenAI 兼容接口接入
-DOUBAO_API_KEY = "sk-7y2TdJzw6TpQJAsrVYEDKWtQdtfHo20OjKJm8zc8yTgtIRQR"
-DOUBAO_BASE_URL = "https://sz.uyilink.com/v1"
-DOUBAO_MODEL = "claude-opus-4-6"
+# ─── 豆包大模型配置 ────────────────────────────────────────────────────────────
+# 通过火山引擎 ARK 接口接入
+DOUBAO_API_KEY = "3e73b78c-bee4-492d-b3f2-9d159fd690a4"
+DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DOUBAO_MODEL = "doubao-seed-2-0-pro-260215"
 
 # ─── LLM 默认参数 ────────────────────────────────────────────────────────────
 LLM_TEMPERATURE = 0
