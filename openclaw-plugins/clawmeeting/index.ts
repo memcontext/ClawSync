@@ -340,7 +340,7 @@ export default function register(api: any) {
   }
   _shared.initialized = true;
 
-  const PKG_VERSION = "1.0.54";
+  const PKG_VERSION = JSON.parse(readFileSync(join(__dirname_esm, "package.json"), "utf-8")).version;
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // register() 内再执行一次（双保险：如果模块顶层执行时 openclaw.json 还没就绪）
@@ -690,7 +690,7 @@ export default function register(api: any) {
           "1. Present the failure reason and meeting details.",
           "2. Clearly tell the user they have TWO options:",
           "   a) Cancel this meeting entirely.",
-          "   b) Modify parameters and retry — explicitly list ALL changeable params: available_slots, duration_minutes, invitees.",
+          "   b) Modify available time slots and retry.",
           "3. Wait for the user's explicit choice. Do NOT proceed without it.",
           "4. CRITICAL: When the user replies with a decision, you MUST call check_and_respond_tasks to execute it.",
           "   '取消'/'算了'/'不开了'/'cancel' → response_type=REJECT. Never just acknowledge verbally — always call the tool.",
