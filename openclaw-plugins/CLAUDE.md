@@ -65,7 +65,7 @@ openclaw-plugins/
 
 | 类型 | 是否推送给用户 | 原因 |
 |------|--------------|------|
-| INITIAL_SUBMIT | ❌ 静默 Agent 处理 | 用户不需要知道，Agent 自动查日历提交 |
+| INITIAL_SUBMIT | ⚡ 能自动就自动，否则通知用户 | Agent 有足够信息（日历/记忆）时自动提交并告知结果；信息不足时必须通知用户提供可用时间 |
 | COUNTER_PROPOSAL | ✅ 推送 | 需要用户决策 |
 | MEETING_FAILED | ✅ 推送 | 需要用户决策（取消/重试） |
 | MEETING_CONFIRMED | ✅ 推送 | 告知用户结果 |
