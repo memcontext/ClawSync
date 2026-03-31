@@ -203,6 +203,7 @@ COLLECTING → ANALYZING → CONFIRMED
 
 ## 开发注意事项
 
+- 工具 schema 字段名必须用 **`parameters`**（与飞书等官方插件一致），由 `api.registerTool()` 注册
 - 修改工具的 `inputSchema` 时，必须同步更新对应的类型定义（`src/types/index.ts`）
 - API 端点必须与服务端 API v1.0.0 严格对齐（见 `src/utils/api-client.ts`）
 - 插件入口使用单例守卫（`_registered`），防止框架多次调用 register

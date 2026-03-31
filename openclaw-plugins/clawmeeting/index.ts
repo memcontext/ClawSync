@@ -11,8 +11,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
-import { homedir, platform, tmpdir } from "os";
-import { spawn } from "child_process";
+import { homedir } from "os";
 import { ClawMeetingApiClient } from "./src/utils/api-client.js";
 import {
   initStorage,
@@ -77,60 +76,85 @@ let _registered = false;
 
 export default function register(api: any) {
   if (_registered) {
+    console.log("[CM:init] ⚠️ register() 被重复调用，跳过（单例守卫）");
     return;
   }
   _registered = true;
 
-  const PKG_VERSION = "1.0.39";
+  const PKG_VERSION = "1.0.42";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // ============================================================
-  // 0. 自动确保 sessions_send 在 gateway.tools.allow 中（直接写 openclaw.json）
+  // 0. 自动确保插件配置完整（plugins.allow + gateway.tools.allow）
   // ============================================================
-  /** 检查并补全 gateway.tools.allow，返回 true 表示触发了重启（调用方应跳过后续初始化） */
-  function ensureToolAllowlist(): boolean {
+  /**
+   * 检查并补全 openclaw.json 中插件运行所需的配置（仅写文件，不重启）。
+   *
+   * 设计原则（对齐飞书等官方插件）：
+   *   - 插件不应自动重启 gateway，否则会导致竞态条件（进程在工具注册过程中被杀死）
+   *   - 配置写入由两层保障：postinstall.mjs（npm install 时）+ 此函数（gateway_start 时兜底）
+   *   - 如果配置缺失并已补全，打印醒目警告提示用户手动重启
+   *
+   * @returns true 表示配置有变更（需要重启才能生效），false 表示一切就绪
+   */
+  function ensurePluginConfig(): boolean {
+    const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
     const REQUIRED_TOOLS = ["sessions_send", "message"];
     try {
       const configPath = join(homedir(), ".openclaw", "openclaw.json");
       if (!existsSync(configPath)) {
-        console.warn("[CM:init] ⚠️ openclaw.json 不存在，跳过自动配置");
+        console.warn("[CM:config] ⚠️ openclaw.json 不存在，跳过自动配置");
         return false;
       }
       const raw = readFileSync(configPath, "utf-8");
       const config = JSON.parse(raw);
-      const allow: string[] = config?.gateway?.tools?.allow ?? [];
-      const missing = REQUIRED_TOOLS.filter(t => !allow.includes(t));
-      if (missing.length === 0) {
-        console.log(`[CM:init] gateway.tools.allow 已包含所需工具: [${REQUIRED_TOOLS.join(", ")}] ✅`);
-        return false;
+      let changed = false;
+
+      console.log(`[CM:config] 读取 openclaw.json 成功，当前配置:`);
+      console.log(`[CM:config]   plugins.allow = ${JSON.stringify(config?.plugins?.allow ?? "未设置")}`);
+      console.log(`[CM:config]   gateway.tools.allow = ${JSON.stringify(config?.gateway?.tools?.allow ?? "未设置")}`);
+
+      // ---- 1. plugins.allow: 确保插件在信任列表 ----
+      if (!config.plugins) config.plugins = {};
+      const pluginsAllow: string[] = config.plugins.allow ?? [];
+      if (!pluginsAllow.includes(PLUGIN_ID_FOR_ALLOW)) {
+        config.plugins.allow = [...pluginsAllow, PLUGIN_ID_FOR_ALLOW];
+        console.log(`[CM:config] ✅ 已将 "${PLUGIN_ID_FOR_ALLOW}" 加入 plugins.allow`);
+        changed = true;
+      } else {
+        console.log(`[CM:config] plugins.allow 已包含 "${PLUGIN_ID_FOR_ALLOW}" ✅`);
       }
-      // 写入缺失的工具
+
+      // ---- 2. gateway.tools.allow: 确保推送工具在白名单 ----
       if (!config.gateway) config.gateway = {};
       if (!config.gateway.tools) config.gateway.tools = {};
-      config.gateway.tools.allow = [...allow, ...missing];
-      writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-      console.log(`[CM:init] ✅ 已自动将 [${missing.join(", ")}] 加入 gateway.tools.allow`);
-
-      // 即将重启 gateway，先主动停掉轮询（防止 gateway_stop 钩子未触发导致孤儿状态）
-      pollingManager.stop();
-      stopQueueProcessor();
-      console.log("[CM:init] 🔄 自动重启 gateway 使配置生效（约 5 秒后恢复）...");
-      if (platform() === "win32") {
-        // Windows: 写临时 .bat，用 start /min 独立执行
-        const batPath = join(tmpdir(), "clawmeeting-restart.bat");
-        const batContent = "@echo off\r\ntimeout /t 2 /nobreak >nul\r\nopenclaw gateway restart\r\n";
-        writeFileSync(batPath, batContent, "utf-8");
-        spawn("cmd", ["/c", "start", "/min", "", batPath], { stdio: "ignore", shell: false });
+      const toolsAllow: string[] = config.gateway.tools.allow ?? [];
+      const missingTools = REQUIRED_TOOLS.filter(t => !toolsAllow.includes(t));
+      if (missingTools.length > 0) {
+        config.gateway.tools.allow = [...toolsAllow, ...missingTools];
+        console.log(`[CM:config] ✅ 已将 [${missingTools.join(", ")}] 加入 gateway.tools.allow`);
+        changed = true;
       } else {
-        // Mac/Linux: detached sh 进程
-        spawn("sh", ["-c", "sleep 2 && openclaw gateway restart"], {
-          detached: true,
-          stdio: "ignore",
-        }).unref();
+        console.log(`[CM:config] gateway.tools.allow 已包含所需工具: [${REQUIRED_TOOLS.join(", ")}] ✅`);
       }
-      return true; // 已触发重启，调用方应跳过后续初始化
+
+      // ---- 无变更，配置已就绪 ----
+      if (!changed) {
+        return false;
+      }
+
+      // ---- 写入配置（不重启，避免竞态条件）----
+      writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+      console.log("[CM:config] 📝 openclaw.json 已更新");
+      console.warn("=".repeat(70));
+      console.warn("[CM:config] ⚠️  配置已自动补全，但需要重启 gateway 才能生效！");
+      console.warn("[CM:config] ⚠️  请运行: openclaw gateway restart");
+      console.warn("[CM:config] ⚠️  如果是首次安装，gateway.tools.allow 中的 sessions_send/message");
+      console.warn("[CM:config] ⚠️  在重启前将无法使用（后台推送会 forbidden）。");
+      console.warn("=".repeat(70));
+      return true;
     } catch (err) {
-      console.warn(`[CM:init] ⚠️ 自动配置 sessions_send 失败: ${(err as Error)?.message}`);
+      console.warn(`[CM:config] ⚠️ 自动配置失败: ${(err as Error)?.message}`);
       return false;
     }
   }
@@ -806,7 +830,7 @@ export default function register(api: any) {
   }
 
   // 注意：轮询不在这里启动。等 gateway_start 钩子触发后再启动，
-  // 确保 ensureToolAllowlist 先执行（sessions_send/message 需要在白名单中）。
+  // 确保 ensurePluginConfig 先执行（plugins.allow + gateway.tools.allow 需要就绪）。
   // 如果 gateway_start 不触发（旧版 SDK），由 registerService.start 兜底。
   if (apiClient.getToken()) {
     console.log("[CM:init] 有已保存的 Token，轮询将在 gateway_start 后启动");
@@ -836,15 +860,19 @@ export default function register(api: any) {
   // ============================================================
   // 13. 生命周期钩子（使用 SDK 标准 hook 名称）
   // ============================================================
+  console.log(`[CM:init] 注册生命周期钩子... api.on 类型=${typeof api.on}`);
   api.on?.(
     "gateway_start",
     () => {
-      // gateway 完全就绪后再检查 sessions_send allowlist
-      const restarting = ensureToolAllowlist();
-      if (restarting) {
-        console.log("[CM:lifecycle] gateway_start: allowlist 缺失，已触发重启，跳过轮询启动");
-        return;
+      // gateway 就绪后检查配置完整性（仅写文件，不重启）
+      const configChanged = ensurePluginConfig();
+      if (configChanged) {
+        console.warn("[CM:lifecycle] gateway_start: 配置已补全但需手动重启 gateway 生效。轮询照常启动（plugin tools 可用，但 sessions_send 可能 forbidden）。");
       }
+      // 无论配置是否变更，都启动轮询：
+      //   - 配置已就绪 → 一切正常
+      //   - 配置刚补全 → plugin tools 在本次启动已注册可用，仅 gateway.tools.allow 需重启生效
+      //     轮询先启动，sessions_send 如果 forbidden 会走失败重试逻辑，重启后自动恢复
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
@@ -853,6 +881,7 @@ export default function register(api: any) {
     },
   );
 
+  console.log("[CM:init] ✅ 钩子注册: gateway_start");
   api.on?.(
     "gateway_stop",
     () => {
@@ -861,10 +890,17 @@ export default function register(api: any) {
       console.log("[CM:lifecycle] gateway_stop: 停止轮询。");
     },
   );
+  console.log("[CM:init] ✅ 钩子注册: gateway_stop");
 
   // ============================================================
-  // 14. 注册 4 个 Tools
+  // 14. 注册 5 个 Tools
   // ============================================================
+  console.log("[CM:init] 开始注册插件工具...");
+  const hasRegisterTool = typeof api.registerTool === "function";
+  console.log(`[CM:init] api.registerTool 类型=${typeof api.registerTool}, 可用=${hasRegisterTool}`);
+  if (!hasRegisterTool) {
+    console.error("[CM:init] ❌ api.registerTool 不是函数，工具将无法注册！请检查 OpenClaw SDK 版本。");
+  }
 
   api.registerTool({
     ...bindIdentitySchema,
@@ -884,6 +920,7 @@ export default function register(api: any) {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
+  console.log("[CM:init] ✅ 工具注册: bind_identity");
 
   api.registerTool({
     ...verifyEmailCodeSchema,
@@ -903,6 +940,7 @@ export default function register(api: any) {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
+  console.log("[CM:init] ✅ 工具注册: verify_email_code");
 
   api.registerTool({
     ...initiateMeetingSchema,
@@ -915,6 +953,7 @@ export default function register(api: any) {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
+  console.log("[CM:init] ✅ 工具注册: initiate_meeting");
 
   const checkHandler = createCheckAndRespondTasksHandler(apiClient);
   api.registerTool({
@@ -960,6 +999,7 @@ export default function register(api: any) {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
+  console.log("[CM:init] ✅ 工具注册: check_and_respond_tasks");
 
   const listHandler = createListMeetingsHandler(apiClient);
   api.registerTool({
@@ -972,6 +1012,8 @@ export default function register(api: any) {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   });
+  console.log("[CM:init] ✅ 工具注册: list_meetings");
+  console.log("[CM:init] 全部 5 个工具注册完成: [bind_identity, verify_email_code, initiate_meeting, check_and_respond_tasks, list_meetings]");
 
   // ============================================================
   // 15. CLI 命令
@@ -1154,7 +1196,16 @@ export default function register(api: any) {
     },
     { priority: 5 },
   );
+  console.log("[CM:init] ✅ 钩子注册: before_prompt_build (priority=5)");
 
   const channelList = extraChannels.size > 0 ? [...extraChannels.keys()].join(",") : "无";
-  console.log(`[CM:init] ClawMeeting 插件加载完成。session=${sessionCtx.sessionKey}, 额外渠道=[${channelList}], polling=${pollingManager.isRunning() ? "运行中" : "未启动"}, gateway=${gatewayToken ? "可用" : "不可用"}`);
+  console.log(`[CM:init] ===== ClawMeeting v${PKG_VERSION} 初始化完成 =====`);
+  console.log(`[CM:init]   session=${sessionCtx.sessionKey}`);
+  console.log(`[CM:init]   额外渠道=[${channelList}]`);
+  console.log(`[CM:init]   polling=${pollingManager.isRunning() ? "运行中" : "未启动（等 gateway_start）"}`);
+  console.log(`[CM:init]   gateway=${gatewayToken ? "可用" : "不可用"}`);
+  console.log(`[CM:init]   api.registerTool=${typeof api.registerTool}`);
+  console.log(`[CM:init]   api.on=${typeof api.on}`);
+  console.log(`[CM:init]   api.registerService=${typeof api.registerService}`);
+  console.log(`[CM:init] ================================`);
 }
