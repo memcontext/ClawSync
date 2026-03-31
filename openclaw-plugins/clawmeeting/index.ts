@@ -1341,4 +1341,4 @@ export default function register(api: any) {
   console.log(`[CM:init]   api.on=${typeof api.on}`);
   console.log(`[CM:init]   api.registerService=${typeof api.registerService}`);
   console.log(`[CM:init] ================================`);
-}
+}}
