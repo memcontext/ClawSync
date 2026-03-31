@@ -87,18 +87,22 @@ const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
 const REQUIRED_GATEWAY_TOOLS = ["sessions_send", "message"];
 
 /**
- * 第一层：同步补全插件信任配置（plugins.allow + plugins.entries）
+ * 一次性补全 openclaw.json 中插件运行所需的全部配置。
  *
- * 时机：模块加载时立即执行，在 register() 之前
- * 目的：确保框架在调用 register() 后检查 allow 列表时，clawmeeting 已在其中
+ * 时机：模块加载时立即执行（在框架调用 register() / 读取 gateway config 之前）
+ * 这是关键——模块 import 发生在 gateway 完成初始化之前，
+ * 所以此时写入的 gateway.tools.allow 能被 gateway 后续读到。
  *
- * 这层只写「让工具可见」的最小配置，不涉及 gateway.tools.allow（那个放第二层）
+ * 补全项：
+ *   1. plugins.allow          — 插件信任列表（框架 bug 可能漏写）
+ *   2. plugins.entries        — 插件启用状态
+ *   3. gateway.tools.allow    — sessions_send / message 推送白名单
  */
-function ensurePluginTrust(): void {
+function ensureAllConfig(): void {
   try {
     const configPath = join(homedir(), ".openclaw", "openclaw.json");
     if (!existsSync(configPath)) {
-      console.log("[CM:config:trust] openclaw.json 不存在，跳过");
+      console.log("[CM:config] openclaw.json 不存在，跳过自动配置");
       return;
     }
     const raw = readFileSync(configPath, "utf-8");
@@ -113,13 +117,12 @@ function ensurePluginTrust(): void {
 
     // ---- 2. plugins.allow：必须是数组且包含 clawmeeting ----
     if (!Array.isArray(config.plugins.allow)) {
-      // 字段不存在 or 不是数组 → 创建并加入
       config.plugins.allow = [PLUGIN_ID_FOR_ALLOW];
-      console.log(`[CM:config:trust] ✅ 创建 plugins.allow 并加入 "${PLUGIN_ID_FOR_ALLOW}"`);
+      console.log(`[CM:config] ✅ 创建 plugins.allow 并加入 "${PLUGIN_ID_FOR_ALLOW}"`);
       changed = true;
     } else if (!config.plugins.allow.includes(PLUGIN_ID_FOR_ALLOW)) {
       config.plugins.allow.push(PLUGIN_ID_FOR_ALLOW);
-      console.log(`[CM:config:trust] ✅ 已将 "${PLUGIN_ID_FOR_ALLOW}" 加入 plugins.allow`);
+      console.log(`[CM:config] ✅ 已将 "${PLUGIN_ID_FOR_ALLOW}" 加入 plugins.allow`);
       changed = true;
     }
 
@@ -127,67 +130,40 @@ function ensurePluginTrust(): void {
     if (!config.plugins.entries) config.plugins.entries = {};
     if (!config.plugins.entries[PLUGIN_ID_FOR_ALLOW]) {
       config.plugins.entries[PLUGIN_ID_FOR_ALLOW] = { enabled: true };
-      console.log(`[CM:config:trust] ✅ 创建 plugins.entries.${PLUGIN_ID_FOR_ALLOW} = { enabled: true }`);
+      console.log(`[CM:config] ✅ 创建 plugins.entries.${PLUGIN_ID_FOR_ALLOW} = { enabled: true }`);
       changed = true;
     } else if (config.plugins.entries[PLUGIN_ID_FOR_ALLOW].enabled === false) {
       config.plugins.entries[PLUGIN_ID_FOR_ALLOW].enabled = true;
-      console.log(`[CM:config:trust] ✅ 已将 plugins.entries.${PLUGIN_ID_FOR_ALLOW}.enabled 设为 true`);
+      console.log(`[CM:config] ✅ 已将 plugins.entries.${PLUGIN_ID_FOR_ALLOW}.enabled 设为 true`);
       changed = true;
     }
 
-    if (!changed) {
-      console.log(`[CM:config:trust] 插件信任配置已完整 ✅ (allow=${JSON.stringify(config.plugins.allow)}, enabled=${config.plugins.entries[PLUGIN_ID_FOR_ALLOW]?.enabled})`);
-      return;
-    }
-
-    writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-    console.log("[CM:config:trust] 📝 openclaw.json 已更新（插件信任配置）");
-  } catch (err) {
-    console.warn(`[CM:config:trust] ⚠️ 写入失败: ${(err as Error)?.message}`);
-  }
-}
-
-/**
- * 第二层：补全 gateway 推送工具白名单（gateway.tools.allow）
- *
- * 时机：gateway_start 钩子中执行
- * 目的：确保 sessions_send / message 可通过 HTTP /tools/invoke 调用
- * 注意：此配置需要重启 gateway 才能生效（写入后本次启动内无效）
- */
-function ensureGatewayToolsAllow(): boolean {
-  try {
-    const configPath = join(homedir(), ".openclaw", "openclaw.json");
-    if (!existsSync(configPath)) return false;
-    const raw = readFileSync(configPath, "utf-8");
-    const config = JSON.parse(raw);
-
+    // ---- 4. gateway.tools.allow：sessions_send + message ----
     if (!config.gateway) config.gateway = {};
     if (!config.gateway.tools) config.gateway.tools = {};
     const toolsAllow: string[] = Array.isArray(config.gateway.tools.allow) ? config.gateway.tools.allow : [];
     const missingTools = REQUIRED_GATEWAY_TOOLS.filter(t => !toolsAllow.includes(t));
-
-    if (missingTools.length === 0) {
-      console.log(`[CM:config:gateway] gateway.tools.allow 已包含所需工具: [${REQUIRED_GATEWAY_TOOLS.join(", ")}] ✅`);
-      return false;
+    if (missingTools.length > 0) {
+      config.gateway.tools.allow = [...toolsAllow, ...missingTools];
+      console.log(`[CM:config] ✅ 已将 [${missingTools.join(", ")}] 加入 gateway.tools.allow`);
+      changed = true;
     }
 
-    // 补全缺失工具
-    config.gateway.tools.allow = [...toolsAllow, ...missingTools];
+    // ---- 汇总 ----
+    if (!changed) {
+      console.log(`[CM:config] 全部配置已完整 ✅ (allow=${JSON.stringify(config.plugins.allow)}, enabled=${config.plugins.entries[PLUGIN_ID_FOR_ALLOW]?.enabled}, gateway.tools.allow=${JSON.stringify(config.gateway.tools.allow)})`);
+      return;
+    }
+
     writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-    console.log(`[CM:config:gateway] ✅ 已将 [${missingTools.join(", ")}] 加入 gateway.tools.allow`);
-    console.warn("=".repeat(60));
-    console.warn("[CM:config:gateway] ⚠️  需要重启 gateway 后 sessions_send/message 才可用");
-    console.warn("[CM:config:gateway] ⚠️  请运行: openclaw gateway restart");
-    console.warn("=".repeat(60));
-    return true;
+    console.log("[CM:config] 📝 openclaw.json 已更新");
   } catch (err) {
-    console.warn(`[CM:config:gateway] ⚠️ 写入失败: ${(err as Error)?.message}`);
-    return false;
+    console.warn(`[CM:config] ⚠️ 自动配置失败: ${(err as Error)?.message}`);
   }
 }
 
-// 🔥 模块加载时立即执行第一层 — 在框架调用 register() 之前确保 allow 就绪
-ensurePluginTrust();
+// 🔥 模块加载时立即执行 — 在框架读取 gateway config / 调用 register() 之前写入全部配置
+ensureAllConfig();
 
 // ---- 单例守卫：防止框架多次调用 register 导致重复加载 ----
 let _registered = false;
@@ -199,11 +175,11 @@ export default function register(api: any) {
   }
   _registered = true;
 
-  const PKG_VERSION = "1.0.44";
+  const PKG_VERSION = "1.0.45";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // register() 内再执行一次（双保险：如果模块顶层执行时 openclaw.json 还没就绪）
-  ensurePluginTrust();
+  ensureAllConfig();
 
   const PLUGIN_ID = readPluginId();
 
@@ -910,13 +886,8 @@ export default function register(api: any) {
   api.on?.(
     "gateway_start",
     () => {
-      // 第一层再跑一次（三保险）
-      ensurePluginTrust();
-      // 第二层：补全 gateway.tools.allow（sessions_send / message）
-      const gatewayChanged = ensureGatewayToolsAllow();
-      if (gatewayChanged) {
-        console.warn("[CM:lifecycle] gateway_start: gateway.tools.allow 已补全，需手动重启才生效。轮询照常启动。");
-      }
+      // 三保险：gateway 就绪后再确认一次配置完整
+      ensureAllConfig();
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
