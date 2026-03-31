@@ -340,7 +340,7 @@ export default function register(api: any) {
   }
   _shared.initialized = true;
 
-  const PKG_VERSION = "1.0.48";
+  const PKG_VERSION = "1.0.54";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // register() 内再执行一次（双保险：如果模块顶层执行时 openclaw.json 还没就绪）
@@ -494,14 +494,52 @@ export default function register(api: any) {
           return { ok: false };
         }
 
-        // 提取 agent reply：response 结构为 { ok, result: { details: { reply, status, ... } } }
-        // 注意：此路径是实测观察所得，非官方文档保证。Agent 调用工具后再回复时结构可能不同。
+        // 提取 agent 完整回复
+        // sessions_send 返回的 reply 字段只是最后一段纯文本摘要，
+        // agent 的完整回复（含会议详情、格式化内容）可能在 messages 数组或 content 字段中。
         let reply: string | undefined;
         try {
           const json = JSON.parse(body);
-          reply = json?.result?.details?.reply ?? undefined;
-          // debug：打印完整 body 以便确认结构（上线后可移除）
-          console.log(`[CM:push] response body full: ${body.substring(0, 1000)}`);
+          const details = json?.result?.details;
+
+          // 优先：从 messages 数组中提取所有 assistant 文本（完整回复）
+          if (Array.isArray(details?.messages)) {
+            const assistantTexts = details.messages
+              .filter((m: any) => m.role === "assistant" && m.content)
+              .map((m: any) => {
+                if (typeof m.content === "string") return m.content;
+                if (Array.isArray(m.content)) {
+                  return m.content
+                    .filter((c: any) => c.type === "text" && c.text)
+                    .map((c: any) => c.text)
+                    .join("\n");
+                }
+                return "";
+              })
+              .filter(Boolean);
+            if (assistantTexts.length > 0) {
+              reply = assistantTexts.join("\n\n");
+              console.log(`[CM:push] reply 提取自 messages 数组 (${assistantTexts.length} 条 assistant 消息, ${reply.length} 字)`);
+            }
+          }
+
+          // 其次：content 字段（可能是完整文本）
+          if (!reply && details?.content) {
+            reply = typeof details.content === "string"
+              ? details.content
+              : JSON.stringify(details.content);
+            console.log(`[CM:push] reply 提取自 details.content (${reply.length} 字)`);
+          }
+
+          // 兜底：reply 字段（只有最后一段摘要）
+          if (!reply && details?.reply) {
+            reply = details.reply;
+            console.log(`[CM:push] reply 提取自 details.reply (兜底, ${reply.length} 字)`);
+          }
+
+          // debug：打印完整 body 结构 key（上线后可移除）
+          const detailKeys = details ? Object.keys(details).join(",") : "null";
+          console.log(`[CM:push] response details keys=[${detailKeys}] body前500字=${body.substring(0, 500)}`);
         } catch (_e) {
           console.warn(`[CM:push] response body 非 JSON: ${body.substring(0, 300)}`);
         }
@@ -660,6 +698,48 @@ export default function register(api: any) {
         ].join(" "),
       ].join("\n");
     }
+    if (taskType === "INITIAL_SUBMIT") {
+      const lines = [header];
+      lines.push(`Meeting: "${t.title ?? "unknown"}"`);
+      lines.push(`Meeting ID: ${t.meeting_id}`);
+      lines.push(`Organizer: ${t.initiator ?? "unknown"}`);
+      lines.push(`Duration: ${t.duration_minutes ?? "unknown"} minutes`);
+      if (msg) lines.push("", msg);
+      // 补充已提交的参与者时段信息
+      if (t._submittedParticipants?.length > 0) {
+        lines.push("", "Submitted available slots:");
+        for (const p of t._submittedParticipants) {
+          lines.push(`  ${p.email} (${p.role}): ${p.latest_slots.join(", ")}`);
+        }
+      }
+      lines.push("", [
+        "Instruction: You received a meeting invitation. Follow these steps to handle it:",
+        
+        "Step 1: Data Retrieval & Priority — Independently gather scheduling context. Priority: 1. Calendar tools (google_calendar/feishu) for hard conflicts; 2. personal_context:retrieve_personal_data for hidden commitments (emails, chats, travel); 3. Memory/Summary for soft preferences (e.g., 'no meetings after 6 PM').",
+        
+        "Step 2: Analysis & Decision — Compare proposed slots against retrieved data. Identify 'Free', 'Conflict', and 'Sub-optimal' (violates preferences) slots. Even if you find a perfect slot, proceed to Step 3 for confirmation.",
+        
+        "Step 3: MANDATORY USER CONFIRMATION — You must present your analysis to the user and wait for their choice. Do NOT call check_and_respond_tasks (INITIAL/REJECT) until the user provides a definitive selection or approval.",
+        
+        "AFTER completing the analysis, reply to the user using the EXACT following structured format:",
+        
+        "### 📅 会议基本信息",
+        "- **会议主题**: [Meeting Title]",
+        "- **组织者**: [Organizer Email]",
+        "- **时长**: [Duration]",
+        
+        "### 🔍 日历与偏好核查结果",
+        "- **可用时段**: [List slots with no conflicts. Mention source: e.g., 'Per Calendar' or 'Per Email']",
+        "- **冲突提醒**: [List specific conflicts: e.g., '14:00 overlaps with Project Sync']",
+        "- **习惯建议**: [e.g., '10:00 is free, but you usually prefer deep work in mornings']",
+        
+        "### 💡 处理建议与请示",
+        "- **推荐方案**: [Your top 1-2 suggested slots]",
+        "- **待确认行动**: [e.g., 'Shall I confirm the 3 PM slot for you?']",
+        
+        "NEVER reply with a single paragraph or just '已提交/已拒绝'. Always provide this full transparency report.",
+        langRule,
+      ].join(" "));
     // 其他类型：通用转告
     return [header, msg, "",
       `Instruction: Relay this notification to the user. Preserve all fields and details exactly. ${langRule}`,
@@ -684,7 +764,10 @@ export default function register(api: any) {
     if (taskType === "MEETING_FAILED") {
       return [`❌ 会议协商失败：「${title}」`, msg, "", "请在对话中回复你的决策（取消/调整参数重试）"].filter(Boolean).join("\n");
     }
-    return [`📅 [${taskType}] ${title}`, msg].filter(Boolean).join("\n");
+    if (taskType === "INITIAL_SUBMIT") {
+      return [`收到 ${title} 会议邀请 📅`, msg].filter(Boolean).join("\n");
+    }
+    return [`📅 ${title}`, msg].filter(Boolean).join("\n");
   }
 
 
@@ -708,7 +791,7 @@ export default function register(api: any) {
 
       console.log(`[CM:collect] 任务: type=${taskType}, meetingId=${meetingId?.slice(-8)}, title="${title}"`);
 
-      // ---- INITIAL_SUBMIT：agent 静默处理 ----
+      // ---- INITIAL_SUBMIT：能自动处理就自动，否则通知用户决策 ----
       if (taskType === "INITIAL_SUBMIT") {
         if (submittedMeetings.has(meetingId)) { console.log(`[CM:collect]   → 跳过: 已在 submittedMeetings`); continue; }
         if (notifiedMeetings.has(`${meetingId}:INITIAL_SUBMIT`)) { console.log(`[CM:collect]   → 跳过: 已在 notifiedMeetings (AGENT_OFFLINE 后)`); continue; }
@@ -718,26 +801,14 @@ export default function register(api: any) {
 
         submittedMeetings.add(meetingId);
 
-        const notifyLines = [
-          `[ClawMeeting Meeting Invitation]`,
-          `Meeting: "${title}"`,
-          `Meeting ID: ${meetingId}`,
-          `Organizer: ${t.initiator ?? "unknown"}`,
-          `Duration: ${t.duration_minutes ?? "unknown"} minutes`,
-        ];
-        if (t.message) notifyLines.push("", t.message);
-
-        // 拉取详情补充发起人的已提交时段
+        // 拉取详情补充发起人的已提交时段，丰富 task 对象供 buildAgentNotification 使用
         try {
           const detail = await apiClient.getMeetingDetail(meetingId);
           const submitted = detail.participants.filter(
             (p: any) => p.has_submitted && p.latest_slots?.length > 0,
           );
           if (submitted.length > 0) {
-            notifyLines.push("", "Submitted available slots:");
-            for (const p of submitted) {
-              notifyLines.push(`  ${p.email} (${p.role}): ${p.latest_slots.join(", ")}`);
-            }
+            t._submittedParticipants = submitted;
           }
         } catch (_e) { /* ignore */ }
 
@@ -745,7 +816,7 @@ export default function register(api: any) {
           task: t,
           retryCount: 0,
           enqueuedAt: Date.now(),
-          agentMsg: notifyLines.join("\n"),
+          agentMsg: buildAgentNotification(t),
           directMsg: buildDirectNotification(t),
         });
         console.log(`[CM:collect]   → 入队 INITIAL_SUBMIT: 「${title}」(${meetingId})`);
@@ -913,20 +984,17 @@ export default function register(api: any) {
         console.log(`[CM:queue] sessions_send 成功`);
 
         // 所有类型（含 INITIAL_SUBMIT）都推送到额外渠道，让用户在 Telegram 等渠道也能看到处理结果
-        if (extraChannels.size > 0) {
-          const channelMsg = reply || (item.directMsg.trim() ? item.directMsg : "");
-          if (!channelMsg) {
-            console.log(`[CM:queue] reply=无 且 directMsg=空，跳过额外渠道推送`);
-          } else {
-            const source = reply ? "agent reply" : "directFallback";
-            for (const [chName, chCtx] of extraChannels) {
-              const target = parseChannelTarget(chCtx.sessionKey);
-              if (target) {
-                console.log(`[CM:queue] ${chName} 推送 (${source}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
-                await sendViaMessageTool(target.channel, target.target, channelMsg);
-              }
+        // 策略：只推 agent reply（经过 prompt 格式化的结果），reply 为空则不推
+        if (extraChannels.size > 0 && reply) {
+          for (const [chName, chCtx] of extraChannels) {
+            const target = parseChannelTarget(chCtx.sessionKey);
+            if (target) {
+              console.log(`[CM:queue] ${chName} 推送 (reply): ${target.channel}:${target.target} (${reply.length}字)`);
+              await sendViaMessageTool(target.channel, target.target, reply);
             }
           }
+        } else if (extraChannels.size > 0) {
+          console.log(`[CM:queue] agent reply 为空，跳过额外渠道推送`);
         }
       }
       } // close else (normal processing, not offline)
