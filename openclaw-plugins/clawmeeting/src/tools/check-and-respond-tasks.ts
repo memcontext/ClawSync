@@ -93,17 +93,6 @@ export const checkAndRespondTasksSchema = {
         type: "string" as const,
         description: "User's preference note or remarks (optional)",
       },
-      duration_minutes: {
-        type: "number" as const,
-        description:
-          "New meeting duration in minutes (optional, only for FAILED→retry: initiator can modify the meeting duration)",
-      },
-      invitees: {
-        type: "array" as const,
-        items: { type: "string" as const },
-        description:
-          "New invitee email list (optional, only for FAILED→retry: initiator can add/remove participants)",
-      },
     },
     required: [],
   },
@@ -220,24 +209,18 @@ function buildFailedInfo(task: PendingTask): object {
       "",
       "You can choose:",
       "1. Cancel this meeting",
-      "2. Modify meeting parameters (times, duration, participants) and start a new round of negotiation",
+      "2. Modify available time slots and start a new round of negotiation",
     ].join("\n"),
     instruction: [
       "Meeting negotiation has failed. The initiator needs to decide next steps. ",
       "【Important】Show the display_to_user content to the user, including the failure reason. ",
       "Then CLEARLY tell the user they have TWO options: ",
       "  Option 1: Cancel this meeting entirely. ",
-      "  Option 2: Modify meeting parameters and start a new round of negotiation. ",
-      "  【You MUST explicitly list ALL changeable parameters to the user】: ",
-      "    a) available_slots — your available time slots ",
-      "    b) duration_minutes — meeting duration (current: " + String(task.duration_minutes ?? "unknown") + " min) ",
-      "    c) invitees — add or remove participants ",
-      "  Do NOT only mention time slots. Always mention all three. ",
+      "  Option 2: Modify available time slots and start a new round of negotiation. ",
       "Wait for the user's decision: ",
       "  - Cancel → call this tool with meeting_id + response_type='REJECT' ",
-      "  - Retry → ask the user which parameters they want to change, then call this tool with: ",
-      "    meeting_id + response_type='INITIAL' + available_slots (required), ",
-      "    and optionally duration_minutes and/or invitees if the user wants to change them. ",
+      "  - Retry → ask the user for new available time slots, then call this tool with: ",
+      "    meeting_id + response_type='INITIAL' + available_slots (required). ",
       "Do NOT proceed without the user's explicit choice.",
     ].join(""),
   };
@@ -252,10 +235,8 @@ export function createCheckAndRespondTasksHandler(
     response_type?: ResponseType;
     available_slots?: TimeSlot[];
     preference_note?: string;
-    duration_minutes?: number;
-    invitees?: string[];
   }) => {
-    const { meeting_id, response_type, available_slots, preference_note, duration_minutes, invitees } =
+    const { meeting_id, response_type, available_slots, preference_note } =
       params;
 
     // Check Token
@@ -292,9 +273,6 @@ export function createCheckAndRespondTasksHandler(
         available_slots: slotsAsStrings,
         preference_note,
       };
-      // FAILED→retry: pass modified meeting parameters if provided
-      if (duration_minutes !== undefined) submitData.duration_minutes = duration_minutes;
-      if (invitees !== undefined) submitData.invitees = invitees;
 
       try {
         const result = await apiClient.submitAvailability(
