@@ -340,7 +340,7 @@ export default function register(api: any) {
   }
   _shared.initialized = true;
 
-  const PKG_VERSION = "1.0.47";
+  const PKG_VERSION = "1.0.48";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // register() 内再执行一次（双保险：如果模块顶层执行时 openclaw.json 还没就绪）
@@ -891,8 +891,8 @@ export default function register(api: any) {
             console.log(`[CM:queue] INITIAL_SUBMIT 失败，不推送到用户渠道，等下次轮询重新入队`);
             submittedMeetings.delete(meetingId);
           } else {
-            const taskMsg = item.task?.message ?? "";
-            if (taskMsg.trim()) {
+            // fallback：用构建好的 directMsg 判断（而非 API 原始 message，后者可能为空）
+            if (item.directMsg.trim()) {
               pendingNotifications.push(item.directMsg);
               for (const [chName, chCtx] of extraChannels) {
                 const target = parseChannelTarget(chCtx.sessionKey);
@@ -901,7 +901,7 @@ export default function register(api: any) {
                 }
               }
             } else {
-              console.log(`[CM:queue] t.message 为空，跳过 fallback 推送（避免空壳通知）`);
+              console.log(`[CM:queue] directMsg 为空，跳过 fallback 推送`);
             }
           }
         } else {
@@ -912,14 +912,11 @@ export default function register(api: any) {
         taskQueue.shift();
         console.log(`[CM:queue] sessions_send 成功`);
 
-        // INITIAL_SUBMIT：有 reply 说明 agent 需要用户决策（如冲突），推到额外渠道；无 reply 说明静默处理完成，不推
-        if (taskType === "INITIAL_SUBMIT" && !reply) {
-          console.log(`[CM:queue] INITIAL_SUBMIT 静默处理完成（reply=无），不推送到额外渠道`);
-        } else if (extraChannels.size > 0) {
-          const taskMsg = item.task?.message ?? "";
-          const channelMsg = reply || (taskMsg.trim() ? item.directMsg : "");
+        // 所有类型（含 INITIAL_SUBMIT）都推送到额外渠道，让用户在 Telegram 等渠道也能看到处理结果
+        if (extraChannels.size > 0) {
+          const channelMsg = reply || (item.directMsg.trim() ? item.directMsg : "");
           if (!channelMsg) {
-            console.log(`[CM:queue] reply=无 且 t.message=空，跳过额外渠道推送`);
+            console.log(`[CM:queue] reply=无 且 directMsg=空，跳过额外渠道推送`);
           } else {
             const source = reply ? "agent reply" : "directFallback";
             for (const [chName, chCtx] of extraChannels) {
