@@ -740,6 +740,8 @@ export default function register(api: any) {
         "NEVER reply with a single paragraph or just '已提交/已拒绝'. Always provide this full transparency report.",
         langRule,
       ].join(" "));
+      return lines.join("\n");
+    }
     // 其他类型：通用转告
     return [header, msg, "",
       `Instruction: Relay this notification to the user. Preserve all fields and details exactly. ${langRule}`,
@@ -1341,4 +1343,4 @@ export default function register(api: any) {
   console.log(`[CM:init]   api.on=${typeof api.on}`);
   console.log(`[CM:init]   api.registerService=${typeof api.registerService}`);
   console.log(`[CM:init] ================================`);
-}}
+}
