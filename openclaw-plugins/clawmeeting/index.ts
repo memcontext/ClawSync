@@ -10,8 +10,13 @@
 // ============================================================
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
+import { fileURLToPath } from "url";
+
+// ESM 兼容：__dirname 在 "type":"module" 下不存在，需手动构造
+const __filename_esm = fileURLToPath(import.meta.url);
+const __dirname_esm = dirname(__filename_esm);
 import { ClawMeetingApiClient } from "./src/utils/api-client.js";
 import {
   initStorage,
@@ -63,13 +68,126 @@ const DEFAULT_CONFIG: ClawMeetingPluginConfig = {
 // ---- 从 manifest 读取插件 ID ----
 function readPluginId(): string {
   try {
-    const manifestPath = join(__dirname, "openclaw.plugin.json");
+    const manifestPath = join(__dirname_esm, "openclaw.plugin.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     return manifest.id ?? "clawmeeting";
   } catch {
     return "clawmeeting";
   }
 }
+
+// ============================================================
+// 配置自检（在 register 之前、模块加载时立即执行）
+// ============================================================
+// 框架 bug：当 plugins.allow 字段不存在时，ensurePluginAllowlisted 会跳过写入，
+// 导致 openclaw plugin install 后工具不暴露给 agent。
+// 所以我们在模块加载时（register 被调用前）就同步补全所有必要配置。
+
+const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
+const REQUIRED_GATEWAY_TOOLS = ["sessions_send", "message"];
+
+/**
+ * 第一层：同步补全插件信任配置（plugins.allow + plugins.entries）
+ *
+ * 时机：模块加载时立即执行，在 register() 之前
+ * 目的：确保框架在调用 register() 后检查 allow 列表时，clawmeeting 已在其中
+ *
+ * 这层只写「让工具可见」的最小配置，不涉及 gateway.tools.allow（那个放第二层）
+ */
+function ensurePluginTrust(): void {
+  try {
+    const configPath = join(homedir(), ".openclaw", "openclaw.json");
+    if (!existsSync(configPath)) {
+      console.log("[CM:config:trust] openclaw.json 不存在，跳过");
+      return;
+    }
+    const raw = readFileSync(configPath, "utf-8");
+    const config = JSON.parse(raw);
+    let changed = false;
+
+    // ---- 1. plugins 根节点 ----
+    if (!config.plugins) {
+      config.plugins = {};
+      changed = true;
+    }
+
+    // ---- 2. plugins.allow：必须是数组且包含 clawmeeting ----
+    if (!Array.isArray(config.plugins.allow)) {
+      // 字段不存在 or 不是数组 → 创建并加入
+      config.plugins.allow = [PLUGIN_ID_FOR_ALLOW];
+      console.log(`[CM:config:trust] ✅ 创建 plugins.allow 并加入 "${PLUGIN_ID_FOR_ALLOW}"`);
+      changed = true;
+    } else if (!config.plugins.allow.includes(PLUGIN_ID_FOR_ALLOW)) {
+      config.plugins.allow.push(PLUGIN_ID_FOR_ALLOW);
+      console.log(`[CM:config:trust] ✅ 已将 "${PLUGIN_ID_FOR_ALLOW}" 加入 plugins.allow`);
+      changed = true;
+    }
+
+    // ---- 3. plugins.entries.clawmeeting.enabled ----
+    if (!config.plugins.entries) config.plugins.entries = {};
+    if (!config.plugins.entries[PLUGIN_ID_FOR_ALLOW]) {
+      config.plugins.entries[PLUGIN_ID_FOR_ALLOW] = { enabled: true };
+      console.log(`[CM:config:trust] ✅ 创建 plugins.entries.${PLUGIN_ID_FOR_ALLOW} = { enabled: true }`);
+      changed = true;
+    } else if (config.plugins.entries[PLUGIN_ID_FOR_ALLOW].enabled === false) {
+      config.plugins.entries[PLUGIN_ID_FOR_ALLOW].enabled = true;
+      console.log(`[CM:config:trust] ✅ 已将 plugins.entries.${PLUGIN_ID_FOR_ALLOW}.enabled 设为 true`);
+      changed = true;
+    }
+
+    if (!changed) {
+      console.log(`[CM:config:trust] 插件信任配置已完整 ✅ (allow=${JSON.stringify(config.plugins.allow)}, enabled=${config.plugins.entries[PLUGIN_ID_FOR_ALLOW]?.enabled})`);
+      return;
+    }
+
+    writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+    console.log("[CM:config:trust] 📝 openclaw.json 已更新（插件信任配置）");
+  } catch (err) {
+    console.warn(`[CM:config:trust] ⚠️ 写入失败: ${(err as Error)?.message}`);
+  }
+}
+
+/**
+ * 第二层：补全 gateway 推送工具白名单（gateway.tools.allow）
+ *
+ * 时机：gateway_start 钩子中执行
+ * 目的：确保 sessions_send / message 可通过 HTTP /tools/invoke 调用
+ * 注意：此配置需要重启 gateway 才能生效（写入后本次启动内无效）
+ */
+function ensureGatewayToolsAllow(): boolean {
+  try {
+    const configPath = join(homedir(), ".openclaw", "openclaw.json");
+    if (!existsSync(configPath)) return false;
+    const raw = readFileSync(configPath, "utf-8");
+    const config = JSON.parse(raw);
+
+    if (!config.gateway) config.gateway = {};
+    if (!config.gateway.tools) config.gateway.tools = {};
+    const toolsAllow: string[] = Array.isArray(config.gateway.tools.allow) ? config.gateway.tools.allow : [];
+    const missingTools = REQUIRED_GATEWAY_TOOLS.filter(t => !toolsAllow.includes(t));
+
+    if (missingTools.length === 0) {
+      console.log(`[CM:config:gateway] gateway.tools.allow 已包含所需工具: [${REQUIRED_GATEWAY_TOOLS.join(", ")}] ✅`);
+      return false;
+    }
+
+    // 补全缺失工具
+    config.gateway.tools.allow = [...toolsAllow, ...missingTools];
+    writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+    console.log(`[CM:config:gateway] ✅ 已将 [${missingTools.join(", ")}] 加入 gateway.tools.allow`);
+    console.warn("=".repeat(60));
+    console.warn("[CM:config:gateway] ⚠️  需要重启 gateway 后 sessions_send/message 才可用");
+    console.warn("[CM:config:gateway] ⚠️  请运行: openclaw gateway restart");
+    console.warn("=".repeat(60));
+    return true;
+  } catch (err) {
+    console.warn(`[CM:config:gateway] ⚠️ 写入失败: ${(err as Error)?.message}`);
+    return false;
+  }
+}
+
+// 🔥 模块加载时立即执行第一层 — 在框架调用 register() 之前确保 allow 就绪
+ensurePluginTrust();
 
 // ---- 单例守卫：防止框架多次调用 register 导致重复加载 ----
 let _registered = false;
@@ -81,83 +199,11 @@ export default function register(api: any) {
   }
   _registered = true;
 
-  const PKG_VERSION = "1.0.42";
+  const PKG_VERSION = "1.0.44";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
-  // ============================================================
-  // 0. 自动确保插件配置完整（plugins.allow + gateway.tools.allow）
-  // ============================================================
-  /**
-   * 检查并补全 openclaw.json 中插件运行所需的配置（仅写文件，不重启）。
-   *
-   * 设计原则（对齐飞书等官方插件）：
-   *   - 插件不应自动重启 gateway，否则会导致竞态条件（进程在工具注册过程中被杀死）
-   *   - 配置写入由两层保障：postinstall.mjs（npm install 时）+ 此函数（gateway_start 时兜底）
-   *   - 如果配置缺失并已补全，打印醒目警告提示用户手动重启
-   *
-   * @returns true 表示配置有变更（需要重启才能生效），false 表示一切就绪
-   */
-  function ensurePluginConfig(): boolean {
-    const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
-    const REQUIRED_TOOLS = ["sessions_send", "message"];
-    try {
-      const configPath = join(homedir(), ".openclaw", "openclaw.json");
-      if (!existsSync(configPath)) {
-        console.warn("[CM:config] ⚠️ openclaw.json 不存在，跳过自动配置");
-        return false;
-      }
-      const raw = readFileSync(configPath, "utf-8");
-      const config = JSON.parse(raw);
-      let changed = false;
-
-      console.log(`[CM:config] 读取 openclaw.json 成功，当前配置:`);
-      console.log(`[CM:config]   plugins.allow = ${JSON.stringify(config?.plugins?.allow ?? "未设置")}`);
-      console.log(`[CM:config]   gateway.tools.allow = ${JSON.stringify(config?.gateway?.tools?.allow ?? "未设置")}`);
-
-      // ---- 1. plugins.allow: 确保插件在信任列表 ----
-      if (!config.plugins) config.plugins = {};
-      const pluginsAllow: string[] = config.plugins.allow ?? [];
-      if (!pluginsAllow.includes(PLUGIN_ID_FOR_ALLOW)) {
-        config.plugins.allow = [...pluginsAllow, PLUGIN_ID_FOR_ALLOW];
-        console.log(`[CM:config] ✅ 已将 "${PLUGIN_ID_FOR_ALLOW}" 加入 plugins.allow`);
-        changed = true;
-      } else {
-        console.log(`[CM:config] plugins.allow 已包含 "${PLUGIN_ID_FOR_ALLOW}" ✅`);
-      }
-
-      // ---- 2. gateway.tools.allow: 确保推送工具在白名单 ----
-      if (!config.gateway) config.gateway = {};
-      if (!config.gateway.tools) config.gateway.tools = {};
-      const toolsAllow: string[] = config.gateway.tools.allow ?? [];
-      const missingTools = REQUIRED_TOOLS.filter(t => !toolsAllow.includes(t));
-      if (missingTools.length > 0) {
-        config.gateway.tools.allow = [...toolsAllow, ...missingTools];
-        console.log(`[CM:config] ✅ 已将 [${missingTools.join(", ")}] 加入 gateway.tools.allow`);
-        changed = true;
-      } else {
-        console.log(`[CM:config] gateway.tools.allow 已包含所需工具: [${REQUIRED_TOOLS.join(", ")}] ✅`);
-      }
-
-      // ---- 无变更，配置已就绪 ----
-      if (!changed) {
-        return false;
-      }
-
-      // ---- 写入配置（不重启，避免竞态条件）----
-      writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-      console.log("[CM:config] 📝 openclaw.json 已更新");
-      console.warn("=".repeat(70));
-      console.warn("[CM:config] ⚠️  配置已自动补全，但需要重启 gateway 才能生效！");
-      console.warn("[CM:config] ⚠️  请运行: openclaw gateway restart");
-      console.warn("[CM:config] ⚠️  如果是首次安装，gateway.tools.allow 中的 sessions_send/message");
-      console.warn("[CM:config] ⚠️  在重启前将无法使用（后台推送会 forbidden）。");
-      console.warn("=".repeat(70));
-      return true;
-    } catch (err) {
-      console.warn(`[CM:config] ⚠️ 自动配置失败: ${(err as Error)?.message}`);
-      return false;
-    }
-  }
+  // register() 内再执行一次（双保险：如果模块顶层执行时 openclaw.json 还没就绪）
+  ensurePluginTrust();
 
   const PLUGIN_ID = readPluginId();
 
@@ -864,15 +910,13 @@ export default function register(api: any) {
   api.on?.(
     "gateway_start",
     () => {
-      // gateway 就绪后检查配置完整性（仅写文件，不重启）
-      const configChanged = ensurePluginConfig();
-      if (configChanged) {
-        console.warn("[CM:lifecycle] gateway_start: 配置已补全但需手动重启 gateway 生效。轮询照常启动（plugin tools 可用，但 sessions_send 可能 forbidden）。");
+      // 第一层再跑一次（三保险）
+      ensurePluginTrust();
+      // 第二层：补全 gateway.tools.allow（sessions_send / message）
+      const gatewayChanged = ensureGatewayToolsAllow();
+      if (gatewayChanged) {
+        console.warn("[CM:lifecycle] gateway_start: gateway.tools.allow 已补全，需手动重启才生效。轮询照常启动。");
       }
-      // 无论配置是否变更，都启动轮询：
-      //   - 配置已就绪 → 一切正常
-      //   - 配置刚补全 → plugin tools 在本次启动已注册可用，仅 gateway.tools.allow 需重启生效
-      //     轮询先启动，sessions_send 如果 forbidden 会走失败重试逻辑，重启后自动恢复
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
