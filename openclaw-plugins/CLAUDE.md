@@ -206,7 +206,7 @@ COLLECTING → ANALYZING → CONFIRMED
 - 工具 schema 字段名必须用 **`parameters`**（与飞书等官方插件一致），由 `api.registerTool()` 注册
 - 修改工具的 `inputSchema` 时，必须同步更新对应的类型定义（`src/types/index.ts`）
 - API 端点必须与服务端 API v1.0.0 严格对齐（见 `src/utils/api-client.ts`）
-- 插件入口使用单例守卫（`_registered`），防止框架多次调用 register
+- 插件入口拆分为"工具注册"（每次 register() 都执行）和"运行时初始化"（`_shared.initialized` 守卫，只执行一次）。OpenClaw 会为不同 Registry 多次调用 register()，工具必须每次都注册到新 registry，运行时单例通过模块级 `_shared` 对象共享
 - `before_prompt_build` 中非主 session 直接返回 `{}`，节省 token
 - 后台轮询为纯 HTTP，不消耗 LLM token
 - 所有 `api.xxx?.()` 使用可选链调用，兼容不同版本的 OpenClaw SDK

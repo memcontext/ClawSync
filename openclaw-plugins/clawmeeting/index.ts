@@ -86,6 +86,16 @@ function readPluginId(): string {
 const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
 const REQUIRED_GATEWAY_TOOLS = ["sessions_send", "message"];
 
+// 插件工具名 — 这些通过 api.registerTool() 注册，由框架自动暴露给 LLM，
+// 绝不应该出现在 tools.allow 或 gateway.tools.allow 中（旧版本可能误写）
+const PLUGIN_TOOL_NAMES = [
+  "bind_identity",
+  "verify_email_code",
+  "initiate_meeting",
+  "check_and_respond_tasks",
+  "list_meetings",
+];
+
 /**
  * 一次性补全 openclaw.json 中插件运行所需的全部配置。
  *
@@ -138,15 +148,39 @@ function ensureAllConfig(): void {
       changed = true;
     }
 
-    // ---- 4. gateway.tools.allow：sessions_send + message ----
+    // ---- 4. gateway.tools.allow：添加 sessions_send + message ----
     if (!config.gateway) config.gateway = {};
     if (!config.gateway.tools) config.gateway.tools = {};
-    const toolsAllow: string[] = Array.isArray(config.gateway.tools.allow) ? config.gateway.tools.allow : [];
-    const missingTools = REQUIRED_GATEWAY_TOOLS.filter(t => !toolsAllow.includes(t));
-    if (missingTools.length > 0) {
-      config.gateway.tools.allow = [...toolsAllow, ...missingTools];
-      console.log(`[CM:config] ✅ 已将 [${missingTools.join(", ")}] 加入 gateway.tools.allow`);
+    if (!Array.isArray(config.gateway.tools.allow)) config.gateway.tools.allow = [];
+    const missingGw = REQUIRED_GATEWAY_TOOLS.filter(t => !config.gateway.tools.allow.includes(t));
+    if (missingGw.length > 0) {
+      config.gateway.tools.allow = [...config.gateway.tools.allow, ...missingGw];
+      console.log(`[CM:config] ✅ 已将 [${missingGw.join(", ")}] 加入 gateway.tools.allow`);
       changed = true;
+    }
+
+    // ---- 5. 清理：从 gateway.tools.allow 移除不该存在的插件工具名 ----
+    const staleGw = config.gateway.tools.allow.filter((t: string) => PLUGIN_TOOL_NAMES.includes(t));
+    if (staleGw.length > 0) {
+      config.gateway.tools.allow = config.gateway.tools.allow.filter((t: string) => !PLUGIN_TOOL_NAMES.includes(t));
+      console.log(`[CM:config] 🧹 从 gateway.tools.allow 移除误写的插件工具: [${staleGw.join(", ")}]`);
+      changed = true;
+    }
+
+    // ---- 6. 清理：从 tools.allow 移除不该存在的插件工具名 ----
+    if (config.tools && Array.isArray(config.tools.allow)) {
+      const staleTools = config.tools.allow.filter((t: string) => PLUGIN_TOOL_NAMES.includes(t));
+      if (staleTools.length > 0) {
+        config.tools.allow = config.tools.allow.filter((t: string) => !PLUGIN_TOOL_NAMES.includes(t));
+        // 如果清理后 tools.allow 为空数组，删除整个字段避免意外限制
+        if (config.tools.allow.length === 0) {
+          delete config.tools.allow;
+          console.log(`[CM:config] 🧹 tools.allow 清空后已删除（避免空白名单阻止所有工具）`);
+        } else {
+          console.log(`[CM:config] 🧹 从 tools.allow 移除误写的插件工具: [${staleTools.join(", ")}]`);
+        }
+        changed = true;
+      }
     }
 
     // ---- 汇总 ----
@@ -165,17 +199,148 @@ function ensureAllConfig(): void {
 // 🔥 模块加载时立即执行 — 在框架读取 gateway config / 调用 register() 之前写入全部配置
 ensureAllConfig();
 
-// ---- 单例守卫：防止框架多次调用 register 导致重复加载 ----
-let _registered = false;
+// ---- 模块级共享上下文（跨多次 register() 调用，第一次初始化后永久有效）----
+// OpenClaw 会为不同 Registry 多次调用 register()，工具必须每次都注册，
+// 但运行时状态（API Client / 轮询 / 钩子）只初始化一次。
+const _shared: {
+  initialized: boolean;
+  apiClient: ClawMeetingApiClient | null;
+  pollingManager: PollingManager | null;
+  pendingDecisions: Set<string> | null;
+  submittedMeetings: Set<string> | null;
+  refreshCredentials: (() => void) | null;
+  startQueueProcessor: (() => void) | null;
+} = {
+  initialized: false,
+  apiClient: null,
+  pollingManager: null,
+  pendingDecisions: null,
+  submittedMeetings: null,
+  refreshCredentials: null,
+  startQueueProcessor: null,
+};
 
 export default function register(api: any) {
-  if (_registered) {
-    console.log("[CM:init] ⚠️ register() 被重复调用，跳过（单例守卫）");
+  // ============================================================
+  // A. 工具注册（每次 register() 都执行，确保所有 Registry 都包含插件工具）
+  //    工具 execute 闭包通过 _shared 引用运行时单例（第一次 register() 初始化）
+  // ============================================================
+  api.registerTool({
+    ...bindIdentitySchema,
+    async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> bind_identity 调用: email=${params.email}`);
+      const startMs = Date.now();
+      const handler = createBindIdentityHandler(_shared.apiClient!, () => {
+        _shared.refreshCredentials!();
+        if (!_shared.pollingManager!.isRunning()) {
+          console.log(`[CM:tool] bind_identity → 绑定成功，启动轮询`);
+          _shared.pollingManager!.start();
+          _shared.startQueueProcessor!();
+        }
+      });
+      const result = await handler(params);
+      console.log(`[CM:tool] <<< bind_identity 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, already_bound=${(result as any).already_bound}`);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  });
+
+  api.registerTool({
+    ...verifyEmailCodeSchema,
+    async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> verify_email_code 调用: email=${params.email}, code=${params.code}`);
+      const startMs = Date.now();
+      const handler = createVerifyEmailCodeHandler(_shared.apiClient!, () => {
+        _shared.refreshCredentials!();
+        if (!_shared.pollingManager!.isRunning()) {
+          console.log(`[CM:tool] verify_email_code → 绑定成功，启动轮询`);
+          _shared.pollingManager!.start();
+          _shared.startQueueProcessor!();
+        }
+      });
+      const result = await handler(params);
+      console.log(`[CM:tool] <<< verify_email_code 完成 (${Date.now() - startMs}ms): success=${(result as any).success}`);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  });
+
+  api.registerTool({
+    ...initiateMeetingSchema,
+    async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> initiate_meeting 调用: title="${params.title}", duration=${params.duration_minutes}min, invitees=[${params.invitees?.join(",")}], slots=${params.available_slots?.length ?? 0}个`);
+      const startMs = Date.now();
+      const handler = createInitiateMeetingHandler(_shared.apiClient!);
+      const result = await handler(params);
+      console.log(`[CM:tool] <<< initiate_meeting 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, meeting_id=${(result as any).meeting_id ?? "N/A"}`);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  });
+
+  api.registerTool({
+    ...checkAndRespondTasksSchema,
+    async execute(_id: string, params: any) {
+      const isQuery = !params.meeting_id;
+      if (isQuery) {
+        console.log(`[CM:tool] >>> check_and_respond_tasks 调用 (Mode A: 查询任务列表)`);
+      } else {
+        console.log(`[CM:tool] >>> check_and_respond_tasks 调用 (Mode B: 提交响应) meeting_id=${params.meeting_id?.slice(-8)}, response_type=${params.response_type}, slots=${params.available_slots?.length ?? 0}个`);
+      }
+      const startMs = Date.now();
+      const checkHandler = createCheckAndRespondTasksHandler(_shared.apiClient!);
+      const result = await checkHandler(params);
+      const elapsed = Date.now() - startMs;
+
+      if (isQuery) {
+        console.log(`[CM:tool] <<< check_and_respond_tasks 查询完成 (${elapsed}ms): success=${(result as any).success}, pending_count=${(result as any).pending_count ?? 0}`);
+        if ((result as any).task_results?.length) {
+          const tasks = (result as any).task_results;
+          console.log(`[CM:tool]   任务详情: ${tasks.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
+        }
+      } else {
+        console.log(`[CM:tool] <<< check_and_respond_tasks 提交完成 (${elapsed}ms): success=${(result as any).success}, status=${(result as any).status ?? "N/A"}`);
+      }
+
+      // 用户通过 Agent 提交了决策 → 清除等待状态，允许后续新轮次
+      if (params.meeting_id && params.response_type && (result as any).success) {
+        if (_shared.pendingDecisions!.has(params.meeting_id)) {
+          _shared.pendingDecisions!.delete(params.meeting_id);
+          savePendingDecisions([..._shared.pendingDecisions!]);
+          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} 用户已决策(${params.response_type})，从 pendingDecisions 移除`);
+        }
+        if (params.response_type !== "INITIAL") {
+          _shared.submittedMeetings!.delete(params.meeting_id);
+          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} 从 submittedMeetings 移除（非 INITIAL）`);
+        } else {
+          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} INITIAL 提交成功，保留在 submittedMeetings 中`);
+        }
+      }
+
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  });
+
+  api.registerTool({
+    ...listMeetingsSchema,
+    async execute(_id: string, params: any) {
+      console.log(`[CM:tool] >>> list_meetings 调用: meeting_id=${params.meeting_id ?? "(列表模式)"}`);
+      const startMs = Date.now();
+      const handler = createListMeetingsHandler(_shared.apiClient!);
+      const result = await handler(params);
+      console.log(`[CM:tool] <<< list_meetings 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, total=${(result as any).total ?? "N/A"}`);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  });
+  console.log("[CM:init] 5 个工具已注册到当前 registry");
+
+  // ============================================================
+  // B. 运行时初始化（只执行一次 — 避免重复创建 API Client / 轮询 / 钩子）
+  // ============================================================
+  if (_shared.initialized) {
+    console.log("[CM:init] register() 再次调用 — 工具已注册到新 registry，跳过运行时初始化");
     return;
   }
-  _registered = true;
+  _shared.initialized = true;
 
-  const PKG_VERSION = "1.0.45";
+  const PKG_VERSION = "1.0.47";
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
   // register() 内再执行一次（双保险：如果模块顶层执行时 openclaw.json 还没就绪）
@@ -908,127 +1073,15 @@ export default function register(api: any) {
   console.log("[CM:init] ✅ 钩子注册: gateway_stop");
 
   // ============================================================
-  // 14. 注册 5 个 Tools
+  // 14. 暴露运行时单例到 _shared（供工具 execute 闭包引用）
   // ============================================================
-  console.log("[CM:init] 开始注册插件工具...");
-  const hasRegisterTool = typeof api.registerTool === "function";
-  console.log(`[CM:init] api.registerTool 类型=${typeof api.registerTool}, 可用=${hasRegisterTool}`);
-  if (!hasRegisterTool) {
-    console.error("[CM:init] ❌ api.registerTool 不是函数，工具将无法注册！请检查 OpenClaw SDK 版本。");
-  }
-
-  api.registerTool({
-    ...bindIdentitySchema,
-    async execute(_id: string, params: any) {
-      console.log(`[CM:tool] >>> bind_identity 调用: email=${params.email}`);
-      const startMs = Date.now();
-      const handler = createBindIdentityHandler(apiClient, () => {
-        refreshCredentials();
-        if (!pollingManager.isRunning()) {
-          console.log(`[CM:tool] bind_identity → 绑定成功，启动轮询`);
-          pollingManager.start();
-          startQueueProcessor();
-        }
-      });
-      const result = await handler(params);
-      console.log(`[CM:tool] <<< bind_identity 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, already_bound=${(result as any).already_bound}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    },
-  });
-  console.log("[CM:init] ✅ 工具注册: bind_identity");
-
-  api.registerTool({
-    ...verifyEmailCodeSchema,
-    async execute(_id: string, params: any) {
-      console.log(`[CM:tool] >>> verify_email_code 调用: email=${params.email}, code=${params.code}`);
-      const startMs = Date.now();
-      const handler = createVerifyEmailCodeHandler(apiClient, () => {
-        refreshCredentials();
-        if (!pollingManager.isRunning()) {
-          console.log(`[CM:tool] verify_email_code → 绑定成功，启动轮询`);
-          pollingManager.start();
-          startQueueProcessor();
-        }
-      });
-      const result = await handler(params);
-      console.log(`[CM:tool] <<< verify_email_code 完成 (${Date.now() - startMs}ms): success=${(result as any).success}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    },
-  });
-  console.log("[CM:init] ✅ 工具注册: verify_email_code");
-
-  api.registerTool({
-    ...initiateMeetingSchema,
-    async execute(_id: string, params: any) {
-      console.log(`[CM:tool] >>> initiate_meeting 调用: title="${params.title}", duration=${params.duration_minutes}min, invitees=[${params.invitees?.join(",")}], slots=${params.available_slots?.length ?? 0}个`);
-      const startMs = Date.now();
-      const handler = createInitiateMeetingHandler(apiClient);
-      const result = await handler(params);
-      console.log(`[CM:tool] <<< initiate_meeting 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, meeting_id=${(result as any).meeting_id ?? "N/A"}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    },
-  });
-  console.log("[CM:init] ✅ 工具注册: initiate_meeting");
-
-  const checkHandler = createCheckAndRespondTasksHandler(apiClient);
-  api.registerTool({
-    ...checkAndRespondTasksSchema,
-    async execute(_id: string, params: any) {
-      const isQuery = !params.meeting_id;
-      if (isQuery) {
-        console.log(`[CM:tool] >>> check_and_respond_tasks 调用 (Mode A: 查询任务列表)`);
-      } else {
-        console.log(`[CM:tool] >>> check_and_respond_tasks 调用 (Mode B: 提交响应) meeting_id=${params.meeting_id?.slice(-8)}, response_type=${params.response_type}, slots=${params.available_slots?.length ?? 0}个`);
-      }
-      const startMs = Date.now();
-      const result = await checkHandler(params);
-      const elapsed = Date.now() - startMs;
-
-      if (isQuery) {
-        console.log(`[CM:tool] <<< check_and_respond_tasks 查询完成 (${elapsed}ms): success=${(result as any).success}, pending_count=${(result as any).pending_count ?? 0}`);
-        if ((result as any).task_results?.length) {
-          const tasks = (result as any).task_results;
-          console.log(`[CM:tool]   任务详情: ${tasks.map((t: any) => `${t.task_type}(${t.meeting_id?.slice(-8)})`).join(", ")}`);
-        }
-      } else {
-        console.log(`[CM:tool] <<< check_and_respond_tasks 提交完成 (${elapsed}ms): success=${(result as any).success}, status=${(result as any).status ?? "N/A"}`);
-      }
-
-      // 用户通过 Agent 提交了决策 → 清除等待状态，允许后续新轮次
-      if (params.meeting_id && params.response_type && (result as any).success) {
-        if (pendingDecisions.has(params.meeting_id)) {
-          pendingDecisions.delete(params.meeting_id);
-          savePendingDecisions([...pendingDecisions]);
-          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} 用户已决策(${params.response_type})，从 pendingDecisions 移除`);
-        }
-        // 只在用户主动决策（非首次提交）时清除 submittedMeetings，允许新轮次重新自动提交
-        // INITIAL 提交后不清除，否则会议仍在 COLLECTING 状态时轮询会重复推送
-        if (params.response_type !== "INITIAL") {
-          submittedMeetings.delete(params.meeting_id);
-          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} 从 submittedMeetings 移除（非 INITIAL）`);
-        } else {
-          console.log(`[CM:dedup] 会议 ${params.meeting_id.slice(-8)} INITIAL 提交成功，保留在 submittedMeetings 中`);
-        }
-      }
-
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    },
-  });
-  console.log("[CM:init] ✅ 工具注册: check_and_respond_tasks");
-
-  const listHandler = createListMeetingsHandler(apiClient);
-  api.registerTool({
-    ...listMeetingsSchema,
-    async execute(_id: string, params: any) {
-      console.log(`[CM:tool] >>> list_meetings 调用: meeting_id=${params.meeting_id ?? "(列表模式)"}`);
-      const startMs = Date.now();
-      const result = await listHandler(params);
-      console.log(`[CM:tool] <<< list_meetings 完成 (${Date.now() - startMs}ms): success=${(result as any).success}, total=${(result as any).total ?? "N/A"}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    },
-  });
-  console.log("[CM:init] ✅ 工具注册: list_meetings");
-  console.log("[CM:init] 全部 5 个工具注册完成: [bind_identity, verify_email_code, initiate_meeting, check_and_respond_tasks, list_meetings]");
+  _shared.apiClient = apiClient;
+  _shared.pollingManager = pollingManager;
+  _shared.pendingDecisions = pendingDecisions;
+  _shared.submittedMeetings = submittedMeetings;
+  _shared.refreshCredentials = refreshCredentials;
+  _shared.startQueueProcessor = startQueueProcessor;
+  console.log("[CM:init] _shared 运行时上下文已就绪");
 
   // ============================================================
   // 15. CLI 命令
