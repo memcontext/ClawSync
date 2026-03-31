@@ -8,7 +8,7 @@
 # 通过 OpenAI 兼容接口接入
 DOUBAO_API_KEY = "sk-7y2TdJzw6TpQJAsrVYEDKWtQdtfHo20OjKJm8zc8yTgtIRQR"
 DOUBAO_BASE_URL = "https://sz.uyilink.com/v1"
-DOUBAO_MODEL = "claude-3-5-sonnet-20241022"
+DOUBAO_MODEL = "claude-sonnet-4-6"
 
 # ─── LLM 默认参数 ────────────────────────────────────────────────────────────
 LLM_TEMPERATURE = 0
