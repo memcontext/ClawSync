@@ -1,7 +1,7 @@
 {
   "id": "clawmeeting",
   "name": "ClawMeeting - AI Meeting Negotiator",
-  "version": "1.0.58",
+  "version": "1.0.59",
   "description": "智能会议协商插件。提供 5 个工具：bind_identity（邮箱绑定）、verify_email_code（验证码校验）、initiate_meeting（发起会议）、check_and_respond_tasks（查询待办/提交决策）、list_meetings（查看会议）。所有会议操作必须通过这些工具完成，禁止直接调用外部 API。",
   "skills": ["./skills"],
   "configSchema": {
