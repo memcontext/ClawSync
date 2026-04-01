@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
 
 // ESM 兼容：__dirname 在 "type":"module" 下不存在，需手动构造
 const __filename_esm = fileURLToPath(import.meta.url);
@@ -152,11 +153,13 @@ function ensureAllConfig(): void {
     if (!config.gateway) config.gateway = {};
     if (!config.gateway.tools) config.gateway.tools = {};
     if (!Array.isArray(config.gateway.tools.allow)) config.gateway.tools.allow = [];
+    let gatewayToolsChanged = false;
     const missingGw = REQUIRED_GATEWAY_TOOLS.filter(t => !config.gateway.tools.allow.includes(t));
     if (missingGw.length > 0) {
       config.gateway.tools.allow = [...config.gateway.tools.allow, ...missingGw];
       console.log(`[CM:config] ✅ 已将 [${missingGw.join(", ")}] 加入 gateway.tools.allow`);
       changed = true;
+      gatewayToolsChanged = true;
     }
 
     // ---- 5. 清理：从 gateway.tools.allow 移除不该存在的插件工具名 ----
@@ -191,6 +194,25 @@ function ensureAllConfig(): void {
 
     writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
     console.log("[CM:config] 📝 openclaw.json 已更新");
+
+    // gateway.tools.allow 变更后必须重启 gateway 才能生效（内存白名单不会热更新）
+    // 只在 sessions_send/message 首次写入时触发，避免其他配置变更也重启
+    if (gatewayToolsChanged) {
+      console.log("[CM:config] ⚠️ gateway.tools.allow 已变更，3 秒后自动重启 gateway 以加载新配置...");
+      setTimeout(() => {
+        try {
+          const child = spawn("openclaw", ["gateway", "restart"], {
+            detached: true,
+            stdio: "ignore",
+            shell: true,
+          });
+          child.unref();
+          console.log("[CM:config] 🔄 已触发 gateway 重启");
+        } catch (e) {
+          console.warn(`[CM:config] ⚠️ 自动重启失败: ${(e as Error)?.message}，请手动执行: openclaw gateway restart`);
+        }
+      }, 3000);
+    }
   } catch (err) {
     console.warn(`[CM:config] ⚠️ 自动配置失败: ${(err as Error)?.message}`);
   }
@@ -454,7 +476,7 @@ export default function register(api: any) {
   /**
    * 通过 sessions_send 发送到指定 session，触发 agent turn
    */
-  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean; reply?: string }> {
+  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean; reply?: string; timedOut?: boolean }> {
     const sk = sessionKey ?? sessionCtx.sessionKey ?? "agent:main:main";
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000); // 60s：agent 可能调用 LLM 或等待用户输入
@@ -537,15 +559,29 @@ export default function register(api: any) {
             console.log(`[CM:push] reply 提取自 details.reply (兜底, ${reply.length} 字)`);
           }
 
+          // 检测 gateway 端 agent.wait 超时
+          // 此时 agent 实际上可能还在处理中或已处理完，但 gateway 先返回了 timeout
+          const isTimeout = details?.status === "timeout";
+          if (isTimeout) {
+            console.warn(`[CM:push] ⚠️ sessions_send gateway 超时 (agent.wait 到期)，agent 可能已处理但 reply 未捕获`);
+          }
+
           // debug：打印完整 body 结构 key（上线后可移除）
           const detailKeys = details ? Object.keys(details).join(",") : "null";
-          console.log(`[CM:push] response details keys=[${detailKeys}] body前500字=${body.substring(0, 500)}`);
+          console.log(`[CM:push] response details keys=[${detailKeys}]${isTimeout ? " [TIMEOUT]" : ""} body前500字=${body.substring(0, 500)}`);
         } catch (_e) {
           console.warn(`[CM:push] response body 非 JSON: ${body.substring(0, 300)}`);
         }
 
-        console.log(`[CM:push] <<< sessions_send 成功 → ${sk} (${elapsed}ms) reply=${reply ? `"${reply.substring(0, 150)}..."` : "无"}`);
-        return { ok: true, reply };
+        // 检测是否超时（body 已解析过，再解析一次获取标志）
+        let timedOut = false;
+        try {
+          const j2 = JSON.parse(body);
+          timedOut = j2?.result?.details?.status === "timeout";
+        } catch {}
+
+        console.log(`[CM:push] <<< sessions_send ${timedOut ? "超时(gateway)" : "成功"} → ${sk} (${elapsed}ms) reply=${reply ? `"${reply.substring(0, 150)}..."` : "无"}`);
+        return { ok: true, reply, timedOut };
       } else {
         const body = await res.text();
         console.error(`[CM:push] <<< sessions_send 失败 → ${sk} (${elapsed}ms) HTTP=${res.status} body=${body.substring(0, 300)}`);
@@ -717,34 +753,42 @@ export default function register(api: any) {
         }
       }
       lines.push("", [
-        "Instruction: You received a meeting invitation. Follow these steps to handle it:",
-        
-        "Step 1: Data Retrieval & Priority — Independently gather scheduling context. Priority: 1. Calendar tools (google_calendar/feishu) for hard conflicts; 2. personal_context:retrieve_personal_data for hidden commitments (emails, chats, travel); 3. Memory/Summary for soft preferences (e.g., 'no meetings after 6 PM').",
-        
-        "Step 2: Analysis & Decision — Compare proposed slots against retrieved data. Identify 'Free', 'Conflict', and 'Sub-optimal' (violates preferences) slots.",
-        
-        "Step 3: Execution Policy — Prefer autonomous execution. If confidence is high and data is sufficient, call check_and_respond_tasks immediately (response_type=INITIAL with available_slots, or REJECT when clearly impossible). Ask the user first only when information is insufficient, conflicts are ambiguous, or you cannot make a reliable decision.",
-        
-        "After processing (auto-submitted or awaiting user confirmation), reply to the user using the EXACT following structured format:",
-        
+        "Instruction: You received a meeting invitation. Handle it FAST (aim for <20s):",
+        "",
+        "Step 1: Check if calendar tool is available (feishu_calendar_event / google_calendar).",
+        "  - YES → Query calendar for the proposed time range to get real conflicts. Then go to Step 3.",
+        "  - NO (tool not available or auth error) → Go to Step 2.",
+        "",
+        "Step 2 (No calendar): Check memory/summary for known schedule info (business trips, recurring meetings, preferences).",
+        "  - If you find clear conflicts or free slots → Go to Step 3.",
+        "  - If insufficient info → Present the meeting details to the user and ask them to confirm which time slots work. Do NOT auto-submit. Skip to output format.",
+        "",
+        "Step 3: Execution — Based on calendar/memory data:",
+        "  - Confident (clear free slots, no ambiguity) → call check_and_respond_tasks immediately (response_type=INITIAL, available_slots=free slots).",
+        "  - Conflicts or ambiguous → Present analysis to user, ask for decision. Do NOT auto-submit.",
+        "  - Clearly impossible (all slots conflict) → call check_and_respond_tasks(response_type=REJECT).",
+        "",
+        "IMPORTANT: Do NOT call multiple tools sequentially (calendar + memory + submit). Pick ONE path and execute. Speed matters.",
+        "",
+        "After processing, reply using this EXACT structured format (MANDATORY — never skip or simplify):",
+        "",
         "### 📅 会议基本信息",
         "- **会议主题**: [Meeting Title]",
         "- **组织者**: [Organizer Email]",
         "- **时长**: [Duration]",
-        
-        "### 🔍 日历与偏好核查结果",
-        "- **可用时段**: [List slots with no conflicts. Mention source: e.g., 'Per Calendar' or 'Per Email']",
-        "- **冲突提醒**: [List specific conflicts: e.g., '14:00 overlaps with Project Sync']",
-        "- **习惯建议**: [e.g., '10:00 is free, but you usually prefer deep work in mornings']",
-        
-        "### 💡 处理建议与请示",
-        "- **推荐方案**: [Your top 1-2 suggested slots]",
-        "- **执行动作**: [e.g., '已自动提交 ACCEPT_PROPOSAL: 15:00-15:30' / '待你确认后提交']",
-        "- **待确认行动**: [Only if needed. e.g., 'Shall I confirm the 3 PM slot for you?']",
-        
-        "NEVER reply with a single paragraph or just '已提交/已拒绝'. Always provide this full transparency report.",
+        "",
+        "### 🔍 日程核查结果",
+        "- **数据来源**: [日历查询 / 记忆推断 / 无可用数据]",
+        "- **可用时段**: [List free slots, or '未知（需用户确认）']",
+        "- **冲突提醒**: [Specific conflicts, or '无已知冲突']",
+        "",
+        "### 💡 处理结果",
+        "- **执行动作**: [e.g., '已自动提交: 13:00-18:00 全时段可用' / '待你确认后提交']",
+        "- **待确认**: [If needed: 'Which slots work for you?']",
+        "",
+        "NEVER reply with a single paragraph or just '已提交/已拒绝'. Always provide the full structured report above.",
         langRule,
-      ].join(" "));
+      ].join("\n"));
       return lines.join("\n");
     }
     // 其他类型：通用转告
@@ -957,7 +1001,7 @@ export default function register(api: any) {
       // ---- 正常处理：sessions_send → 提取 reply → message tool 分发 ----
       console.log(`[CM:queue] 处理: ${taskType}(${meetingId?.slice(-8)}) 「${title}」 retry=${item.retryCount} age=${Math.round(ageMs / 1000)}s`);
 
-      const { ok: mainOk, reply } = await sendViaSessionsSend(item.agentMsg);
+      const { ok: mainOk, reply, timedOut } = await sendViaSessionsSend(item.agentMsg);
 
       if (!mainOk) {
         // ---- sessions_send 失败 ----
@@ -991,17 +1035,30 @@ export default function register(api: any) {
         console.log(`[CM:queue] sessions_send 成功`);
 
         // 所有类型（含 INITIAL_SUBMIT）都推送到额外渠道，让用户在 Telegram 等渠道也能看到处理结果
-        // 策略：只推 agent reply（经过 prompt 格式化的结果），reply 为空则不推
-        if (extraChannels.size > 0 && reply) {
-          for (const [chName, chCtx] of extraChannels) {
-            const target = parseChannelTarget(chCtx.sessionKey);
-            if (target) {
-              console.log(`[CM:queue] ${chName} 推送 (reply): ${target.channel}:${target.target} (${reply.length}字)`);
-              await sendViaMessageTool(target.channel, target.target, reply);
-            }
+        // 策略：优先推 agent reply（经过 prompt 格式化的结果），reply 为空则 fallback 到 directMsg
+        if (extraChannels.size > 0) {
+          // 确定推送内容：reply 优先，directMsg 兜底
+          let channelMsg: string | undefined;
+          let channelSource: string;
+          if (reply) {
+            channelMsg = reply;
+            channelSource = "agent reply";
+          } else if (item.directMsg.trim()) {
+            channelMsg = item.directMsg;
+            channelSource = timedOut ? "directMsg (gateway 超时, reply 未捕获)" : "directMsg (reply 为空)";
           }
-        } else if (extraChannels.size > 0) {
-          console.log(`[CM:queue] agent reply 为空，跳过额外渠道推送`);
+
+          if (channelMsg) {
+            for (const [chName, chCtx] of extraChannels) {
+              const target = parseChannelTarget(chCtx.sessionKey);
+              if (target) {
+                console.log(`[CM:queue] ${chName} 推送 (${channelSource}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
+                await sendViaMessageTool(target.channel, target.target, channelMsg);
+              }
+            }
+          } else {
+            console.log(`[CM:queue] reply 和 directMsg 均为空，跳过额外渠道推送`);
+          }
         }
       }
       } // close else (normal processing, not offline)
