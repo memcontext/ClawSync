@@ -232,6 +232,7 @@ const _shared: {
   submittedMeetings: Set<string> | null;
   refreshCredentials: (() => void) | null;
   startQueueProcessor: (() => void) | null;
+  _gatewayRestartTriggered: boolean;
 } = {
   initialized: false,
   apiClient: null,
@@ -240,6 +241,7 @@ const _shared: {
   submittedMeetings: null,
   refreshCredentials: null,
   startQueueProcessor: null,
+  _gatewayRestartTriggered: false,
 };
 
 export default function register(api: any) {
@@ -513,6 +515,22 @@ export default function register(api: any) {
         const isForbidden = body.includes('"status":"forbidden"') || body.includes('"status": "forbidden"');
         if (isForbidden) {
           console.error(`[CM:push] <<< sessions_send forbidden → ${sk} (${elapsed}ms) body=${body.substring(0, 400)}`);
+          // gateway 内存白名单未加载 sessions_send → 触发一次性重启
+          if (!_shared._gatewayRestartTriggered) {
+            _shared._gatewayRestartTriggered = true;
+            console.log("[CM:push] ⚠️ sessions_send 被 forbidden，gateway 可能未加载最新配置，3 秒后自动重启...");
+            setTimeout(() => {
+              try {
+                const child = spawn("openclaw", ["gateway", "restart"], {
+                  detached: true, stdio: "ignore", shell: true,
+                });
+                child.unref();
+                console.log("[CM:push] 🔄 已触发 gateway 重启（forbidden 恢复）");
+              } catch (e) {
+                console.warn(`[CM:push] ⚠️ 自动重启失败: ${(e as Error)?.message}，请手动执行: openclaw gateway restart`);
+              }
+            }, 3000);
+          }
           return { ok: false };
         }
 
