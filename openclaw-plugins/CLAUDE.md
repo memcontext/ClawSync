@@ -65,10 +65,10 @@ openclaw-plugins/
 
 | 类型 | 是否推送给用户 | 原因 |
 |------|--------------|------|
-| INITIAL_SUBMIT | ⚡ 能自动就自动，否则通知用户 | Agent 有足够信息（日历/记忆）时自动提交并告知结果；信息不足时必须通知用户提供可用时间 |
-| COUNTER_PROPOSAL | ✅ 推送 | 需要用户决策 |
-| MEETING_FAILED | ✅ 推送 | 需要用户决策（取消/重试） |
-| MEETING_CONFIRMED | ✅ 推送 | 告知用户结果 |
+| INITIAL_SUBMIT | ⚡ 能自动就自动，否则通知用户 | Agent 有足够信息（日历/记忆）时自动提交并告知结果；信息不足时必须通知用户提供可用时间。处理后必须输出结构化报告（会议信息、核查结果、建议与请示），禁止一句话"已提交/已拒绝" |
+| COUNTER_PROPOSAL | ✅ 推送 | 需要用户三选一：接受/提出新时段/拒绝 |
+| MEETING_FAILED | ✅ 推送 | 需要用户三选一：取消/改时段重试/修改会议设置（时长、拆分、增减人员、改线上线下等），设置变更走 REJECT 关闭当前 + initiate_meeting 创建新会议 |
+| MEETING_CONFIRMED | ✅ 推送 | 告知用户结果，完整展示所有字段（标题、时间、时长、链接） |
 | MEETING_OVER | ✅ 推送 | 告知用户结果 |
 
 ### 框架交互约束
@@ -158,10 +158,10 @@ api.registerCli?.((cliCtx: { program: any }) => {
 ### 通知投递（任务队列：collectTasks → processQueue）
 轮询发现新任务 → `collectTasks` 去重+入队（毫秒级） → `processQueue`（5s 定时器）逐条处理：
 1. **sessions_send** 到主 session（`agent:main:main`，60s 超时）→ 触发 agent turn
-2. **提取 reply** — 从 response 中提取 `result.details.reply`
-3. **message tool 分发** — 将 reply 推送到所有额外渠道（Telegram/飞书/Discord）
+2. **提取 reply** — 从 response 中提取完整 agent 回复（优先 messages 数组 > content > reply 兜底）
+3. **message tool 分发** — 只推 agent reply 到所有额外渠道（Telegram/飞书/Discord），不拼 directMsg 避免重复；reply 为空则跳过
 4. **失败重试** — sessions_send 失败则留在队列，下轮重试（最多 3 次）
-5. **超时放弃** — 3 次失败后用 `buildDirectNotification`（用户友好格式）fallback 到 prependContext + message tool
+5. **超时放弃** — 3 次失败后 INITIAL_SUBMIT 清除 submittedMeetings 等下次轮询重入队；其他类型用 `buildDirectNotification` fallback 到 prependContext + message tool
 6. **Agent Offline** — 入队超 10 分钟未处理 → 自动 `REJECT` + 通知用户
 
 **message tool** 仅在正式渠道可用，webchat 不支持。webchat 用户通过 sessions_send 触发的 agent turn 直接看到回复。
@@ -242,14 +242,21 @@ COLLECTING → ANALYZING → CONFIRMED
    - Agent Offline：入队超 10 分钟 → 自动 REJECT + `"Agent offline"` + 通知用户
    - sessions_send 超时 30s → 60s
 8. **preference_note 必填** — agent 提交时必须带用户偏好/约束说明
-9. **FAILED 重试指令增强** — 明确列出所有可修改参数（时间/时长/参与者）
-10. **GUIDE.md 合并到 SKILL.md** — 去掉重复文档，统一为一个 agent skill 文件
+9. **MEETING_FAILED 三选一决策** — 取消/改时段重试/修改会议设置（时长、拆分、增减人员、改线上线下），设置变更走 REJECT + initiate_meeting
+10. **INITIAL_SUBMIT 优先自动提交** — Agent 有足够信息时自动提交，仅信息不足/冲突不明确时才请示用户；处理后必须输出结构化报告（会议信息、核查结果、建议与请示）
+11. **受邀者未注册提醒** — initiate_meeting 返回未注册受邀者时提醒用户（后续版本支持邮件沟通）
+12. **额外渠道只推 agent reply** — 不再拼 directMsg，避免重复信息
+13. **版本号软编码** — index.ts 从 package.json 动态读取版本号，只需更新一处
+14. **reply 提取增强** — 优先从 messages 数组提取完整 assistant 回复，兜底 content → reply
+15. **移除不支持的 submit 参数** — 去掉 duration_minutes 和 invitees（服务端 submit 接口不支持）
+16. **GUIDE.md 合并到 SKILL.md** — 去掉重复文档，统一为一个 agent skill 文件
 
 ### 待优化
 
 - webchat 推送 UX（sessions_send 的系统消息气泡仍可见，等 OpenClaw 开放 `chat.inject` 给插件）
-- 飞书渠道实测（代码已支持，待配置飞书 Bot 验证）
+- 飞书渠道首次需用户发消息触发捕获（无 allowFrom.json），之后重启自动恢复
 - npm 发布新版（当前 npm 为 1.0.18，本地代码已超前）
+- 协调端增加重叠时间不足检测（参与者与发起人时间重叠 < 会议时长 → FAILED）
 
 ---
 
