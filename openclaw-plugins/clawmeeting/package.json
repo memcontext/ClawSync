@@ -1,6 +1,6 @@
 {
   "name": "clawmeeting",
-  "version": "1.0.67",
+  "version": "1.0.69",
   "type": "module",
   "description": "ClawMeeting - AI meeting negotiation agent plugin for OpenClaw",
   "main": "index.ts",
