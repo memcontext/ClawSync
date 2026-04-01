@@ -13,7 +13,6 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
 
 // ESM 兼容：__dirname 在 "type":"module" 下不存在，需手动构造
 const __filename_esm = fileURLToPath(import.meta.url);
@@ -87,10 +86,7 @@ function readPluginId(): string {
 const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
 const REQUIRED_GATEWAY_TOOLS = ["sessions_send", "message"];
 const RESTART_WELCOME_FLAG = join(homedir(), ".openclaw", "clawmeeting-restart-welcome.flag");
-const GW_RESTART_FLAG = join(homedir(), ".openclaw", "clawmeeting-gw-restart.json");
 
-// Gateway 工具可用性状态（模块级，跨 register() 调用共享）
-const _gwTools = { sessions_send: false, message: false, probed: false };
 
 // 插件工具名 — 这些通过 api.registerTool() 注册，由框架自动暴露给 LLM，
 // 绝不应该出现在 tools.allow 或 gateway.tools.allow 中（旧版本可能误写）
@@ -101,105 +97,6 @@ const PLUGIN_TOOL_NAMES = [
   "check_and_respond_tasks",
   "list_meetings",
 ];
-
-// ============================================================
-// Gateway 工具探测 + 自愈重启
-// ============================================================
-
-/**
- * 探测单个 gateway 工具是否可用
- * 发送最小请求：404 = 未加载，其他 (200/400/403) = 已加载
- */
-async function probeGatewayTool(port: number, token: string, toolName: string): Promise<boolean> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-      body: JSON.stringify({ tool: toolName, args: { sessionKey: "__probe__", message: "ping" } }),
-      signal: AbortSignal.timeout(5000),
-    });
-    // 404 = 工具未注册；其他状态码（含 400/403）说明工具已加载只是参数不对
-    const available = res.status !== 404;
-    console.log(`[CM:probe] ${toolName}: ${available ? "✅ 可用" : "❌ 404 未加载"} (HTTP ${res.status})`);
-    return available;
-  } catch (err) {
-    console.warn(`[CM:probe] ${toolName}: 探测异常 — ${(err as Error)?.message}`);
-    return false;
-  }
-}
-
-/**
- * 并行探测 sessions_send + message，更新 _gwTools 状态
- * 不可用时检查磁盘标记 → 决定是否自动重启
- */
-async function probeGatewayTools(port: number, token: string): Promise<void> {
-  const [ss, msg] = await Promise.all([
-    probeGatewayTool(port, token, "sessions_send"),
-    probeGatewayTool(port, token, "message"),
-  ]);
-  _gwTools.sessions_send = ss;
-  _gwTools.message = msg;
-  _gwTools.probed = true;
-
-  if (ss && msg) {
-    // 全部可用 → 清除旧的重启标记（说明之前的重启生效了）
-    if (existsSync(GW_RESTART_FLAG)) {
-      try { unlinkSync(GW_RESTART_FLAG); } catch {}
-      console.log("[CM:probe] 清除旧重启标记（工具已恢复可用）");
-    }
-    return;
-  }
-
-  // 有工具不可用 → 尝试自愈重启
-  const missing = [!ss && "sessions_send", !msg && "message"].filter(Boolean).join(", ");
-  console.warn(`[CM:probe] gateway 工具不可用: [${missing}]`);
-  scheduleGatewayRestart(`probe 失败: ${missing}`);
-}
-
-/**
- * 安排延迟重启 gateway（detached 进程，独立进程组，不被 gateway 重启杀死）
- * 磁盘标记防止 10 分钟内重复重启 → 避免无限循环
- */
-function scheduleGatewayRestart(reason: string): void {
-  // 检查磁盘标记：10 分钟内已重启过 → 跳过
-  try {
-    if (existsSync(GW_RESTART_FLAG)) {
-      const flag = JSON.parse(readFileSync(GW_RESTART_FLAG, "utf-8"));
-      const elapsed = Date.now() - new Date(flag.attemptedAt).getTime();
-      if (elapsed < 10 * 60 * 1000) {
-        console.warn(`[CM:restart] 跳过：${Math.round(elapsed / 1000)}s 前已重启过 (原因: ${flag.reason})。如仍不可用请手动: openclaw gateway restart`);
-        return;
-      }
-    }
-  } catch {}
-
-  // 写磁盘标记
-  try {
-    writeFileSync(GW_RESTART_FLAG, JSON.stringify({
-      attemptedAt: new Date().toISOString(),
-      reason,
-    }), "utf-8");
-  } catch {}
-
-  // 确保配置文件包含所需字段（可能刚安装，还没写入）
-  ensureAllConfig();
-
-  // spawn detached 进程：等 5 秒后执行 openclaw gateway restart
-  try {
-    const isWin = process.platform === "win32";
-    if (isWin) {
-      spawn("cmd.exe", ["/d", "/s", "/c",
-        "timeout /t 5 /nobreak >nul & openclaw gateway restart",
-      ], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-    } else {
-      spawn("bash", ["-c", "sleep 5 && openclaw gateway restart"],
-        { detached: true, stdio: "ignore" }).unref();
-    }
-    console.log(`[CM:restart] 🔄 已安排 5 秒后自动重启 gateway (原因: ${reason})`);
-  } catch (err) {
-    console.warn(`[CM:restart] ⚠️ 自动重启失败: ${(err as Error)?.message}，请手动: openclaw gateway restart`);
-  }
-}
 
 /**
  * 补全 openclaw.json 中插件运行所需的全部配置。
@@ -258,12 +155,10 @@ function ensureAllConfig(): void {
     if (!config.gateway.tools) config.gateway.tools = {};
     if (!Array.isArray(config.gateway.tools.allow)) config.gateway.tools.allow = [];
     const missingGw = REQUIRED_GATEWAY_TOOLS.filter((t: string) => !config.gateway.tools.allow.includes(t));
-    let gatewayToolsWritten = false;
     if (missingGw.length > 0) {
       config.gateway.tools.allow = [...config.gateway.tools.allow, ...missingGw];
       console.log(`[CM:config] ✅ 已将 [${missingGw.join(", ")}] 加入 gateway.tools.allow`);
       changed = true;
-      gatewayToolsWritten = true;
       // 写 flag：gateway 重启后 B-section 检测到 → 注入欢迎消息
       try {
         writeFileSync(RESTART_WELCOME_FLAG, "", "utf-8");
@@ -302,11 +197,6 @@ function ensureAllConfig(): void {
 
     writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
     console.log("[CM:config] 📝 openclaw.json 已更新");
-
-    // gateway.tools.allow 首次写入 → 需要重启 gateway 才能加载（gateway 启动时读取配置到内存）
-    if (gatewayToolsWritten) {
-      scheduleGatewayRestart("ensureAllConfig 首次写入 gateway.tools.allow");
-    }
   } catch (err) {
     console.warn(`[CM:config] ⚠️ 自动配置失败: ${(err as Error)?.message}`);
   }
@@ -569,11 +459,6 @@ export default function register(api: any) {
    * 通过 sessions_send 发送到指定 session，触发 agent turn
    */
   async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean; reply?: string; timedOut?: boolean }> {
-    // 探测已确认不可用 → 直接跳过，避免浪费请求
-    if (_gwTools.probed && !_gwTools.sessions_send) {
-      console.log("[CM:push] sessions_send 不可用（探测标记），跳过");
-      return { ok: false };
-    }
     const sk = sessionKey ?? sessionCtx.sessionKey ?? "agent:main:main";
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000); // 60s：agent 可能调用 LLM 或等待用户输入
@@ -687,11 +572,6 @@ export default function register(api: any) {
       } else {
         const body = await res.text();
         console.error(`[CM:push] <<< sessions_send 失败 → ${sk} (${elapsed}ms) HTTP=${res.status} body=${body.substring(0, 300)}`);
-        // 404 = gateway 未加载 sessions_send → 标记不可用 + 触发自愈重启
-        if (res.status === 404) {
-          _gwTools.sessions_send = false;
-          scheduleGatewayRestart("sessions_send 运行时 404");
-        }
         return { ok: false };
       }
     } catch (err) {
@@ -721,10 +601,6 @@ export default function register(api: any) {
    * 不触发 agent turn，用户直接看到消息内容
    */
   async function sendViaMessageTool(channel: string, target: string, message: string): Promise<{ ok: boolean }> {
-    if (_gwTools.probed && !_gwTools.message) {
-      console.log("[CM:push] message tool 不可用（探测标记），跳过");
-      return { ok: false };
-    }
     const startMs = Date.now();
     console.log(`[CM:push] >>> message tool 目标=${channel}:${target} 消息长度=${message.length} 摘要="${message.substring(0, 100).replace(/\n/g, "\\n")}"`);
 
@@ -754,10 +630,6 @@ export default function register(api: any) {
         return { ok: true };
       } else {
         console.error(`[CM:push] <<< message tool 失败 → ${channel}:${target} (${elapsed}ms) HTTP=${res.status} body=${body.substring(0, 300)}`);
-        if (res.status === 404) {
-          _gwTools.message = false;
-          scheduleGatewayRestart("message 运行时 404");
-        }
         return { ok: false };
       }
     } catch (err) {
@@ -1294,16 +1166,9 @@ export default function register(api: any) {
   console.log(`[CM:init] 注册生命周期钩子... api.on 类型=${typeof api.on}`);
   api.on?.(
     "gateway_start",
-    async () => {
+    () => {
       // 三保险：gateway 就绪后确认插件配置
       ensureAllConfig();
-
-      // 主动探测 gateway 工具可用性（sessions_send + message）
-      // 不可用时自动触发重启（磁盘标记防循环）
-      if (gatewayToken) {
-        await probeGatewayTools(gatewayPort, gatewayToken);
-      }
-
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
         pollingManager.start();
