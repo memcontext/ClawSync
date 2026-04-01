@@ -9,11 +9,10 @@
 //   6. 去重三层：notifiedMeetings(磁盘) / submittedMeetings(内存) / pendingDecisions(磁盘)
 // ============================================================
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
 
 // ESM 兼容：__dirname 在 "type":"module" 下不存在，需手动构造
 const __filename_esm = fileURLToPath(import.meta.url);
@@ -60,7 +59,7 @@ import type { ClawMeetingPluginConfig, SessionContext, TaskType } from "./src/ty
 
 // ---- 默认配置 ----
 const DEFAULT_CONFIG: ClawMeetingPluginConfig = {
-  serverUrl: "http://39.105.143.2:7010",
+  serverUrl: "https://memcontext.ai/clawmeeting_api",
   pollingIntervalMs: 10000,
   autoRespond: true,
 };
@@ -86,6 +85,8 @@ function readPluginId(): string {
 
 const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
 const REQUIRED_GATEWAY_TOOLS = ["sessions_send", "message"];
+const RESTART_WELCOME_FLAG = join(homedir(), ".openclaw", "clawmeeting-restart-welcome.flag");
+
 
 // 插件工具名 — 这些通过 api.registerTool() 注册，由框架自动暴露给 LLM，
 // 绝不应该出现在 tools.allow 或 gateway.tools.allow 中（旧版本可能误写）
@@ -98,11 +99,11 @@ const PLUGIN_TOOL_NAMES = [
 ];
 
 /**
- * 一次性补全 openclaw.json 中插件运行所需的全部配置。
+ * 补全 openclaw.json 中插件运行所需的全部配置。
  *
- * 时机：模块加载时立即执行（在框架调用 register() / 读取 gateway config 之前）
- * 这是关键——模块 import 发生在 gateway 完成初始化之前，
- * 所以此时写入的 gateway.tools.allow 能被 gateway 后续读到。
+ * 时机：模块加载时立即执行（`openclaw plugins install` 期间）。
+ * 此时 gateway 尚未启动 file watcher，写入不会触发热重载。
+ * gateway 首次启动时会读取已更新的配置。
  *
  * 补全项：
  *   1. plugins.allow          — 插件信任列表（框架 bug 可能漏写）
@@ -153,13 +154,16 @@ function ensureAllConfig(): void {
     if (!config.gateway) config.gateway = {};
     if (!config.gateway.tools) config.gateway.tools = {};
     if (!Array.isArray(config.gateway.tools.allow)) config.gateway.tools.allow = [];
-    let gatewayToolsChanged = false;
-    const missingGw = REQUIRED_GATEWAY_TOOLS.filter(t => !config.gateway.tools.allow.includes(t));
+    const missingGw = REQUIRED_GATEWAY_TOOLS.filter((t: string) => !config.gateway.tools.allow.includes(t));
     if (missingGw.length > 0) {
       config.gateway.tools.allow = [...config.gateway.tools.allow, ...missingGw];
       console.log(`[CM:config] ✅ 已将 [${missingGw.join(", ")}] 加入 gateway.tools.allow`);
       changed = true;
-      gatewayToolsChanged = true;
+      // 写 flag：gateway 重启后 B-section 检测到 → 注入欢迎消息
+      try {
+        writeFileSync(RESTART_WELCOME_FLAG, "", "utf-8");
+        console.log("[CM:config] 📌 已写入 restart-welcome flag");
+      } catch { /* ignore */ }
     }
 
     // ---- 5. 清理：从 gateway.tools.allow 移除不该存在的插件工具名 ----
@@ -175,7 +179,6 @@ function ensureAllConfig(): void {
       const staleTools = config.tools.allow.filter((t: string) => PLUGIN_TOOL_NAMES.includes(t));
       if (staleTools.length > 0) {
         config.tools.allow = config.tools.allow.filter((t: string) => !PLUGIN_TOOL_NAMES.includes(t));
-        // 如果清理后 tools.allow 为空数组，删除整个字段避免意外限制
         if (config.tools.allow.length === 0) {
           delete config.tools.allow;
           console.log(`[CM:config] 🧹 tools.allow 清空后已删除（避免空白名单阻止所有工具）`);
@@ -188,37 +191,18 @@ function ensureAllConfig(): void {
 
     // ---- 汇总 ----
     if (!changed) {
-      console.log(`[CM:config] 全部配置已完整 ✅ (allow=${JSON.stringify(config.plugins.allow)}, enabled=${config.plugins.entries[PLUGIN_ID_FOR_ALLOW]?.enabled}, gateway.tools.allow=${JSON.stringify(config.gateway.tools.allow)})`);
+      console.log(`[CM:config] 全部配置已完整 ✅`);
       return;
     }
 
     writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
     console.log("[CM:config] 📝 openclaw.json 已更新");
-
-    // gateway.tools.allow 变更后必须重启 gateway 才能生效（内存白名单不会热更新）
-    // 只在 sessions_send/message 首次写入时触发，避免其他配置变更也重启
-    if (gatewayToolsChanged) {
-      console.log("[CM:config] ⚠️ gateway.tools.allow 已变更，3 秒后自动重启 gateway 以加载新配置...");
-      setTimeout(() => {
-        try {
-          const child = spawn("openclaw", ["gateway", "restart"], {
-            detached: true,
-            stdio: "ignore",
-            shell: true,
-          });
-          child.unref();
-          console.log("[CM:config] 🔄 已触发 gateway 重启");
-        } catch (e) {
-          console.warn(`[CM:config] ⚠️ 自动重启失败: ${(e as Error)?.message}，请手动执行: openclaw gateway restart`);
-        }
-      }, 3000);
-    }
   } catch (err) {
     console.warn(`[CM:config] ⚠️ 自动配置失败: ${(err as Error)?.message}`);
   }
 }
 
-// 🔥 模块加载时立即执行 — 在框架读取 gateway config / 调用 register() 之前写入全部配置
+// 🔥 模块加载时立即执行 — 补全全部配置（install 期间，gateway file watcher 尚未激活）
 ensureAllConfig();
 
 // ---- 模块级共享上下文（跨多次 register() 调用，第一次初始化后永久有效）----
@@ -232,7 +216,6 @@ const _shared: {
   submittedMeetings: Set<string> | null;
   refreshCredentials: (() => void) | null;
   startQueueProcessor: (() => void) | null;
-  _gatewayRestartTriggered: boolean;
 } = {
   initialized: false,
   apiClient: null,
@@ -241,7 +224,6 @@ const _shared: {
   submittedMeetings: null,
   refreshCredentials: null,
   startQueueProcessor: null,
-  _gatewayRestartTriggered: false,
 };
 
 export default function register(api: any) {
@@ -367,7 +349,7 @@ export default function register(api: any) {
   const PKG_VERSION = JSON.parse(readFileSync(join(__dirname_esm, "package.json"), "utf-8")).version;
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
-  // register() 内再执行一次（双保险：如果模块顶层执行时 openclaw.json 还没就绪）
+  // 双保险：如果模块顶层执行时 openclaw.json 还没就绪
   ensureAllConfig();
 
   const PLUGIN_ID = readPluginId();
@@ -461,9 +443,7 @@ export default function register(api: any) {
   // 4. Gateway 认证 Token（用于主动推送消息）
   // ============================================================
   const gatewayPort = api.config?.gateway?.port ?? 18789;
-  const gatewayToken = api.config?.gateway?.auth?.token
-    ?? process.env.OPENCLAW_GATEWAY_TOKEN
-    ?? null;
+  const gatewayToken = api.config?.gateway?.auth?.token ?? null;
 
   if (gatewayToken) {
     console.log(`[CM:init] gateway: port=${gatewayPort}, token=${gatewayToken.substring(0, 12)}... → 主动推送可用`);
@@ -515,22 +495,11 @@ export default function register(api: any) {
         const isForbidden = body.includes('"status":"forbidden"') || body.includes('"status": "forbidden"');
         if (isForbidden) {
           console.error(`[CM:push] <<< sessions_send forbidden → ${sk} (${elapsed}ms) body=${body.substring(0, 400)}`);
-          // gateway 内存白名单未加载 sessions_send → 触发一次性重启
-          if (!_shared._gatewayRestartTriggered) {
-            _shared._gatewayRestartTriggered = true;
-            console.log("[CM:push] ⚠️ sessions_send 被 forbidden，gateway 可能未加载最新配置，3 秒后自动重启...");
-            setTimeout(() => {
-              try {
-                const child = spawn("openclaw", ["gateway", "restart"], {
-                  detached: true, stdio: "ignore", shell: true,
-                });
-                child.unref();
-                console.log("[CM:push] 🔄 已触发 gateway 重启（forbidden 恢复）");
-              } catch (e) {
-                console.warn(`[CM:push] ⚠️ 自动重启失败: ${(e as Error)?.message}，请手动执行: openclaw gateway restart`);
-              }
-            }, 3000);
-          }
+          // gateway 白名单可能缺少 sessions_send → 补写配置（需重启 gateway 生效）
+          ensureAllConfig();
+          console.warn(
+            "[CM:push] 💡 部分推送功能尚未激活，重启网关即可体验完整功能：openclaw gateway restart"
+          );
           return { ok: false };
         }
 
@@ -1198,7 +1167,7 @@ export default function register(api: any) {
   api.on?.(
     "gateway_start",
     () => {
-      // 三保险：gateway 就绪后再确认一次配置完整
+      // 三保险：gateway 就绪后确认插件配置
       ensureAllConfig();
       if (apiClient.getToken() && !pollingManager.isRunning()) {
         console.log("[CM:lifecycle] gateway_start: 启动轮询。");
@@ -1429,4 +1398,30 @@ export default function register(api: any) {
   console.log(`[CM:init]   api.on=${typeof api.on}`);
   console.log(`[CM:init]   api.registerService=${typeof api.registerService}`);
   console.log(`[CM:init] ================================`);
+
+  // ============================================================
+  // 重启后欢迎消息注入
+  // ============================================================
+  // 场景：用户执行 "openclaw plugins install clawmeeting 然后介绍插件功能"
+  // → 首次安装触发 gateway 重启 → 用户的请求被中断
+  // → 重启后检测到 flag → 主动注入欢迎消息，同时验证 sessions_send 可用
+  if (existsSync(RESTART_WELCOME_FLAG)) {
+    try { unlinkSync(RESTART_WELCOME_FLAG); } catch { /* ignore */ }
+    console.log("[CM:init] 🎉 检测到 restart-welcome flag，将注入欢迎消息...");
+
+    const readmePath = join(__dirname_esm, "README.md");
+    const welcomePrompt = [
+      "【系统通知】ClawMeeting 插件已安装并配置完成（gateway 已自动重启以加载新配置）。",
+      `请阅读插件说明文件 ${readmePath} ，然后用友好简洁的方式向用户介绍插件的核心功能和使用方法。`,
+    ].join("\n");
+
+    setTimeout(async () => {
+      const result = await sendViaSessionsSend(welcomePrompt);
+      if (result.ok) {
+        console.log("[CM:init] ✅ 欢迎消息注入成功，sessions_send 可用");
+      } else {
+        console.warn("[CM:init] ⚠️ 欢迎消息注入失败，sessions_send 可能未就绪");
+      }
+    }, 8000); // 等 gateway 完全启动 + sessions 就绪
+  }
 }

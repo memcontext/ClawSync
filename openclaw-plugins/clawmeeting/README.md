@@ -41,7 +41,7 @@ Or add to your config manually:
       clawmeeting: {
         enabled: true,
         config: {
-          serverUrl: "http://39.105.143.2:7010",  // coordination server
+          serverUrl: "https://memcontext.ai/clawmeeting_api",  // coordination server
           pollingIntervalMs: 10000,                // poll every 10s
           autoRespond: true                        // enable background polling
         }
@@ -185,7 +185,7 @@ PENDING → COLLECTING → ANALYZING → CONFIRMED → OVER
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `serverUrl` | string | `http://39.105.143.2:7010` | Coordination server URL |
+| `serverUrl` | string | `https://memcontext.ai/clawmeeting_api` | Coordination server URL |
 | `pollingIntervalMs` | number | `10000` | Background polling interval (ms) |
 | `autoRespond` | boolean | `true` | Enable background polling and auto-notification |
 
@@ -272,7 +272,7 @@ openclaw plugins install clawmeeting
       clawmeeting: {
         enabled: true,
         config: {
-          serverUrl: "http://39.105.143.2:7010",  // 协调服务端地址
+          serverUrl: "https://memcontext.ai/clawmeeting_api",  // 协调服务端地址
           pollingIntervalMs: 10000,                // 每 10 秒轮询
           autoRespond: true                        // 启用后台轮询
         }
@@ -415,7 +415,7 @@ PENDING → COLLECTING → ANALYZING → CONFIRMED → OVER
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `serverUrl` | string | `http://39.105.143.2:7010` | 协调服务端地址 |
+| `serverUrl` | string | `https://memcontext.ai/clawmeeting_api` | 协调服务端地址 |
 | `pollingIntervalMs` | number | `10000` | 后台轮询间隔（毫秒） |
 | `autoRespond` | boolean | `true` | 是否启用后台轮询和自动通知 |
 

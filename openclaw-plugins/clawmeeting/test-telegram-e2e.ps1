@@ -8,7 +8,7 @@
 # 组织者: 2226957164@qq.com (token from 1.md)
 # 受邀者: runfengsun@gmail.com (通过 OpenClaw Telegram bot 接收通知)
 
-$serverUrl = "http://39.105.143.2:7010"
+$serverUrl = "https://memcontext.ai/clawmeeting_api"
 $tokenInitiator = "sk-UUw_9i3qeZSA5x7wbf22b6cc6bc27f56"
 $inviteeEmail = "uppxxcco@gmail.com"
 $passCount = 0

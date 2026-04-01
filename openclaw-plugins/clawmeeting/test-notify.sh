@@ -10,7 +10,7 @@
 #   - runfengsun@gmail.com bound in plugin
 
 TOKEN_132="sk-FVklq4YEBJ4GOy3z8d43b780bb9ef86d"
-SERVER_URL="http://39.105.143.2:7010"
+SERVER_URL="https://memcontext.ai/clawmeeting_api"
 INVITEE_EMAIL="runfengsun@gmail.com"
 MAX_WAIT=120  # max seconds to wait for each stage
 

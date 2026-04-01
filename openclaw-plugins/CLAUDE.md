@@ -158,8 +158,8 @@ api.registerCli?.((cliCtx: { program: any }) => {
 ### 通知投递（任务队列：collectTasks → processQueue）
 轮询发现新任务 → `collectTasks` 去重+入队（毫秒级） → `processQueue`（5s 定时器）逐条处理：
 1. **sessions_send** 到主 session（`agent:main:main`，60s 超时）→ 触发 agent turn
-2. **提取 reply** — 从 response 中提取完整 agent 回复（优先 messages 数组 > content > reply 兜底）
-3. **message tool 分发** — 只推 agent reply 到所有额外渠道（Telegram/飞书/Discord），不拼 directMsg 避免重复；reply 为空则跳过
+2. **提取 reply** — 从 response 中提取完整 agent 回复（优先 messages 数组 > content > reply 兜底）；检测 gateway 超时（`status: "timeout"`）并标记
+3. **message tool 分发** — 优先推 agent reply 到所有额外渠道（Telegram/飞书/Discord）；reply 为空时（含 gateway 超时导致 reply 未捕获的场景）fallback 到 `directMsg`（预构建的用户友好通知）
 4. **失败重试** — sessions_send 失败则留在队列，下轮重试（最多 3 次）
 5. **超时放弃** — 3 次失败后 INITIAL_SUBMIT 清除 submittedMeetings 等下次轮询重入队；其他类型用 `buildDirectNotification` fallback 到 prependContext + message tool
 6. **Agent Offline** — 入队超 10 分钟未处理 → 自动 `REJECT` + 通知用户
@@ -245,7 +245,7 @@ COLLECTING → ANALYZING → CONFIRMED
 9. **MEETING_FAILED 三选一决策** — 取消/改时段重试/修改会议设置（时长、拆分、增减人员、改线上线下），设置变更走 REJECT + initiate_meeting
 10. **INITIAL_SUBMIT 优先自动提交** — Agent 有足够信息时自动提交，仅信息不足/冲突不明确时才请示用户；处理后必须输出结构化报告（会议信息、核查结果、建议与请示）
 11. **受邀者未注册提醒** — initiate_meeting 返回未注册受邀者时提醒用户（后续版本支持邮件沟通）
-12. **额外渠道只推 agent reply** — 不再拼 directMsg，避免重复信息
+12. **额外渠道推送策略** — 优先推 agent reply；reply 为空（含 gateway 超时）时 fallback 到 directMsg
 13. **版本号软编码** — index.ts 从 package.json 动态读取版本号，只需更新一处
 14. **reply 提取增强** — 优先从 messages 数组提取完整 assistant 回复，兜底 content → reply
 15. **移除不支持的 submit 参数** — 去掉 duration_minutes 和 invitees（服务端 submit 接口不支持）
