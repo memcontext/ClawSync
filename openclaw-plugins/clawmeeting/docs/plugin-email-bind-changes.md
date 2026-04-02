@@ -1,18 +1,18 @@
-# OpenClaw 插件端 — 邮箱验证绑定改造说明
+# Plugin — Email Verification Binding Changes
 
-## 背景
+## Background
 
-当前插件的 `bind_identity` 工具直接调用 `POST /api/auth/bind` 完成绑定（无验证）。
-需要改为两步验证码流程，确保用户真正拥有该邮箱。
+The plugin's `bind_identity` tool previously called `POST /api/auth/bind` directly (no verification).
+It has been changed to a two-step verification code flow to ensure the user actually owns the email address.
 
-## 需要修改的文件
+## Modified Files
 
 ### 1. `src/utils/api-client.ts`
 
-**新增两个方法：**
+**Two new methods:**
 
 ```typescript
-// 发送验证码
+// Send verification code
 async sendVerificationCode(email: string): Promise<{ message: string }> {
   const res = await this.request<{ message: string }>(
     "POST",
@@ -22,7 +22,7 @@ async sendVerificationCode(email: string): Promise<{ message: string }> {
   return res.data!;
 }
 
-// 验证码校验 + 绑定
+// Verify code + bind
 async verifyAndBind(email: string, code: string): Promise<BindAuthResponse> {
   const res = await this.request<BindAuthResponse>(
     "POST",
@@ -36,42 +36,42 @@ async verifyAndBind(email: string, code: string): Promise<BindAuthResponse> {
 }
 ```
 
-**注意：** `request()` 方法中对 `code !== 200` 的错误处理需要调整，因为 send-code 接口在限频时返回 HTTP 200 但 `code=429`，verify-bind 验证失败时返回 HTTP 200 但 `code=400`。建议在这两个方法中单独处理非 200 code 的情况，将 message 作为用户提示返回，而不是抛出异常。
+**Note:** The `request()` method's error handling for `code !== 200` needs adjustment. The send-code endpoint returns HTTP 200 with `code=429` when rate-limited, and verify-bind returns HTTP 200 with `code=400` on verification failure. These two methods should handle non-200 code values individually, returning the message as a user-facing hint rather than throwing an exception.
 
 ### 2. `src/tools/bind-identity.ts`
 
-**改为两步交互流程：**
+**Changed to a two-step interaction flow:**
 
-当前流程（单步）：
+Previous flow (single step):
 ```
-用户: "绑定邮箱 xxx@qq.com"
-→ 调用 apiClient.bindEmail(email)
-→ 返回 token，绑定完成
-```
-
-改后流程（两步）：
-```
-用户: "绑定邮箱 xxx@qq.com"
-→ Step 1: 调用 apiClient.sendVerificationCode(email)
-→ 返回提示: "验证码已发送到 xxx@qq.com，请查收邮箱并回复验证码"
-
-用户: "验证码是 123456"
-→ Step 2: 调用 apiClient.verifyAndBind(email, "123456")
-→ 验证通过: 保存 token，绑定完成
-→ 验证失败: 返回 "验证码错误，请重新输入或重新获取"
+User: "Bind my email xxx@qq.com"
+-> Call apiClient.bindEmail(email)
+-> Returns token, binding complete
 ```
 
-**具体改动：**
+New flow (two steps):
+```
+User: "Bind my email xxx@qq.com"
+-> Step 1: Call apiClient.sendVerificationCode(email)
+-> Returns: "Verification code sent to xxx@qq.com, please check your inbox and reply with the code"
 
-#### 方案 A：拆分为两个 Tool（推荐）
+User: "The code is 123456"
+-> Step 2: Call apiClient.verifyAndBind(email, "123456")
+-> Success: Save token, binding complete
+-> Failure: "Invalid code, please re-enter or request a new one"
+```
 
-新增一个 `verify_email_code` 工具，与 `bind_identity` 配合：
+**Implementation options:**
 
-- **`bind_identity`**: 接收 email → 调用 send-code → 返回"请回复验证码"
-- **`verify_email_code`**: 接收 email + code → 调用 verify-bind → 保存 token
+#### Option A: Split into two tools (recommended)
+
+Add a `verify_email_code` tool to work alongside `bind_identity`:
+
+- **`bind_identity`**: Receives email -> calls send-code -> returns "please reply with code"
+- **`verify_email_code`**: Receives email + code -> calls verify-bind -> saves token
 
 ```typescript
-// 新增 verify-email-code.ts
+// New file: verify-email-code.ts
 export const verifyEmailCodeSchema = {
   name: "verify_email_code",
   description: "Verify the email code sent to the user's email to complete binding.",
@@ -92,12 +92,12 @@ export const verifyEmailCodeSchema = {
 };
 ```
 
-#### 方案 B：单 Tool + 可选参数
+#### Option B: Single tool with optional parameter
 
-在现有 `bind_identity` 中增加可选的 `code` 参数：
+Add an optional `code` parameter to the existing `bind_identity`:
 
-- 无 code → 发送验证码（Step 1）
-- 有 code → 验证绑定（Step 2）
+- No code -> send verification code (Step 1)
+- With code -> verify and bind (Step 2)
 
 ```typescript
 export const bindIdentitySchema = {
@@ -122,11 +122,11 @@ export const bindIdentitySchema = {
 
 ### 3. `index.ts`
 
-如果采用方案 A（拆分两个 Tool），需要在 `index.ts` 中注册新工具 `verify_email_code`。
+If using Option A (two tools), register the new `verify_email_code` tool in `index.ts`.
 
 ### 4. `src/types/index.ts`
 
-新增类型定义：
+New type definitions:
 
 ```typescript
 export interface SendCodeRequest {
@@ -139,33 +139,33 @@ export interface VerifyBindRequest {
 }
 ```
 
-## 不需要修改的文件
+## Files Not Modified
 
-- `src/utils/storage.ts` — 存储逻辑不变
-- `src/utils/polling-manager.ts` — 轮询逻辑不变
-- `src/tools/initiate-meeting.ts` — 不涉及
-- `src/tools/check-and-respond-tasks.ts` — 不涉及
-- `src/tools/list-meetings.ts` — 不涉及
+- `src/utils/storage.ts` — Storage logic unchanged
+- `src/utils/polling-manager.ts` — Polling logic unchanged
+- `src/tools/initiate-meeting.ts` — Not affected
+- `src/tools/check-and-respond-tasks.ts` — Not affected
+- `src/tools/list-meetings.ts` — Not affected
 
-## 交互示例
+## Interaction Examples
 
-### 正常流程
+### Normal Flow
 ```
-User: 帮我绑定邮箱 test@example.com
-Bot:  验证码已发送到 test@example.com，请查收邮箱并回复 6 位数字验证码。
+User: Bind my email test@example.com
+Bot:  A verification code has been sent to test@example.com. Please check your inbox and reply with the 6-digit code.
 
-User: 验证码是 385721
-Bot:  邮箱绑定成功！已自动登录，可以开始使用会议功能了。
-```
-
-### 验证码错误
-```
-User: 验证码是 000000
-Bot:  验证码错误，请检查后重新输入。如需重新获取，请说"重新发送验证码"。
+User: The code is 385721
+Bot:  Email binding successful! You're now logged in and can start using meeting features.
 ```
 
-### 限频
+### Invalid Code
 ```
-User: 重新发送验证码
-Bot:  请 45 秒后再试。
+User: The code is 000000
+Bot:  Invalid verification code. Please double-check and try again. To request a new code, say "resend verification code".
+```
+
+### Rate Limited
+```
+User: Resend verification code
+Bot:  Please wait 45 seconds before trying again.
 ```

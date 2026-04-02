@@ -1,144 +1,144 @@
-# ClawMeeting 使用引导
+# ClawMeeting Usage Guide
 
 <description>
-ClawMeeting 智能会议协商插件的使用引导与功能介绍。当用户首次使用 ClawMeeting、询问如何使用会议功能、询问插件功能或能做什么、或说"帮我约会议"但尚未绑定邮箱时激活本技能。触发词：ClawMeeting、会议助手、约会议、绑定邮箱、会议协商、介绍插件、插件功能、这个插件、能做什么、怎么用、meeting、scheduling。
+Usage guide and feature introduction for the ClawMeeting intelligent meeting negotiation plugin. Activate this skill when the user first uses ClawMeeting, asks how to use meeting features, asks about plugin capabilities, or says "schedule a meeting" but has not yet bound their email. Trigger words: ClawMeeting, meeting assistant, schedule meeting, bind email, meeting negotiation, introduce plugin, plugin features, what can you do, how to use, meeting, scheduling.
 </description>
 
-## 核心原则
+## Core Principle
 
-**所有会议相关操作必须通过 ClawMeeting 插件工具完成。禁止直接调用任何外部 HTTP API、REST 端点或服务。**
+**All meeting-related operations MUST go through the ClawMeeting plugin tools. NEVER call any external HTTP API, REST endpoint, or service directly.**
 
-## 插件功能介绍
+## Plugin Feature Introduction
 
-当用户询问插件功能时，用自然语言介绍以下内容：
+When the user asks about plugin features, describe the following in natural language:
 
-ClawMeeting 是一个智能会议协商助手，核心能力：
+ClawMeeting is an intelligent meeting negotiation assistant. Core capabilities:
 
-- **一句话约会议**：告诉我"帮我约 xxx@example.com 明天下午开个 30 分钟的会"，我自动发出邀请、收集所有人的空闲时间、协调最佳时间
-- **自动处理邀请**：别人约你开会时，我自动查日历和记忆，帮你回复空闲时间，绝大多数情况无需打扰你
-- **冲突协商**：时间有冲突时，系统 AI 协调员会提出妥协方案，只有需要你拍板时才通知你
-- **多渠道通知**：会议确认、冲突需决策等重要通知会推送到你的所有渠道（Telegram、飞书等）
-- **隐私优先**：服务端只看到你"哪些时间有空"，看不到你在忙什么
+- **Schedule meetings in one sentence**: Say "Schedule a 30-minute meeting with xxx@example.com tomorrow afternoon" and the plugin automatically sends invitations, collects everyone's availability, and finds the best time
+- **Automatic invitation handling**: When someone invites you to a meeting, the plugin checks your calendar and memory, then submits your availability automatically — no interruption needed in most cases
+- **Conflict negotiation**: When there's a time conflict, the server's AI coordinator proposes compromise solutions. You're only notified when your decision is required
+- **Multi-channel notifications**: Important notifications (meeting confirmed, decision needed, etc.) are pushed to all your channels (Telegram, Feishu, etc.)
+- **Privacy-first**: The server only sees "which time slots you're available" — never what you're busy with
 
-使用前需要先绑定邮箱（两步验证码），绑定一次即可永久使用。
+Before using ClawMeeting, you need to bind your email once (two-step verification code). After that, it works permanently.
 
-## 可用工具一览
+## Available Tools
 
-本插件提供 5 个工具，覆盖会议全生命周期。**所有会议操作必须通过这些工具完成，不得绕过。**
+This plugin provides 5 tools covering the full meeting lifecycle. **All meeting operations MUST go through these tools — no exceptions.**
 
-| 工具名 | 用途 | 何时调用 |
-|--------|------|----------|
-| `bind_identity` | 发送验证码到用户邮箱（绑定 Step 1） | 用户提供邮箱要求绑定时 |
-| `verify_email_code` | 校验验证码完成绑定（绑定 Step 2） | 用户提供 6 位验证码时 |
-| `initiate_meeting` | 发起新会议协商 | 用户说"帮我约会议"并提供完整信息后 |
-| `check_and_respond_tasks` | 查询待办 / 提交会议决策 | 用户查邀请、接受/拒绝/改时间时 |
-| `list_meetings` | 查看会议列表或详情 | 用户说"我的会议"、"会议详情"时 |
+| Tool | Purpose | When to Call |
+|------|---------|-------------|
+| `bind_identity` | Send verification code to user's email (Binding Step 1) | When the user provides an email to bind |
+| `verify_email_code` | Verify code and complete binding (Binding Step 2) | When the user provides a 6-digit code |
+| `initiate_meeting` | Start a new meeting negotiation | After user says "schedule a meeting" and all info is collected |
+| `check_and_respond_tasks` | Query pending tasks / submit meeting decisions | When user checks invitations, accepts/rejects/proposes new times |
+| `list_meetings` | View meeting list or details | When user says "my meetings", "meeting details" |
 
-## 引导流程
+## Onboarding Flow
 
-当用户首次接触 ClawMeeting 或不知道怎么用时，按以下顺序引导：
+When the user first encounters ClawMeeting or doesn't know how to use it, guide them in this order:
 
-### 1. 检查绑定状态
+### 1. Check Binding Status
 
-先调用 `check_and_respond_tasks`（无参数），如果返回"尚未完成身份绑定"，说明用户还没绑定邮箱。
+First call `check_and_respond_tasks` (no parameters). If it returns "identity not bound yet", the user hasn't bound their email.
 
-### 2. 引导绑定（两步验证码）
+### 2. Guide Binding (Two-Step Verification)
 
-告诉用户需要绑定邮箱才能开始使用，请用户提供邮箱地址。
+Tell the user they need to bind their email to get started. Ask for their email address.
 
-用户提供邮箱后：
-1. 调用 `bind_identity`（传入邮箱）→ 发送验证码到用户邮箱
-2. 请用户查收邮件，告知验证码
-3. 调用 `verify_email_code`（传入邮箱 + 验证码）→ 完成绑定
+After the user provides their email:
+1. Call `bind_identity` (with email) — sends a verification code to their inbox
+2. Ask the user to check their email and provide the code
+3. Call `verify_email_code` (with email + code) — completes binding
 
-绑定成功后，插件会在后台自动检查新的会议邀请。
+After successful binding, the plugin automatically starts checking for new meeting invitations in the background.
 
-**注意：禁止通过 curl 或直接调用外部 API 来完成绑定。必须使用 `bind_identity` 和 `verify_email_code` 工具。**
+**IMPORTANT: NEVER use curl or call external APIs directly to complete binding. You MUST use the `bind_identity` and `verify_email_code` tools.**
 
-### 3. 告知功能
+### 3. Explain Capabilities
 
-绑定成功后，告诉用户可以做什么：
-- **发起会议**："帮我约 bob@example.com 明天开个会" → 你收集完信息后调用 `initiate_meeting`
-- **查看邀请**："有没有新的会议邀请？" → 调用 `check_and_respond_tasks`（无参数）
-- **查看会议**："我的会议列表" → 调用 `list_meetings`（无参数）
-- **会议详情**："xxx 会议的详情" → 调用 `list_meetings`（传入 meeting_id）
-- **后台自动处理**：别人约你开会时自动回复空闲时间，需要你决策时才通知你
+After successful binding, tell the user what they can do:
+- **Schedule a meeting**: "Schedule a meeting with bob@example.com tomorrow" — you collect the info, then call `initiate_meeting`
+- **Check invitations**: "Any new meeting invitations?" — call `check_and_respond_tasks` (no params)
+- **View meetings**: "My meeting list" — call `list_meetings` (no params)
+- **Meeting details**: "Details of the xxx meeting" — call `list_meetings` (with meeting_id)
+- **Background auto-handling**: When someone invites you, the plugin auto-submits your availability; you're only notified when a decision is needed
 
-## 工具详细用法
+## Tool Detailed Usage
 
-### bind_identity — 邮箱绑定 Step 1
+### bind_identity — Email Binding Step 1
 
-**参数**：`email`（必填，用户邮箱）
-**效果**：向邮箱发送 6 位验证码
-**下一步**：等用户提供验证码，然后调用 `verify_email_code`
+**Parameters**: `email` (required, user's email address)
+**Effect**: Sends a 6-digit verification code to the email
+**Next step**: Wait for the user to provide the code, then call `verify_email_code`
 
-### verify_email_code — 邮箱绑定 Step 2
+### verify_email_code — Email Binding Step 2
 
-**参数**：`email`（必填）、`code`（必填，6 位验证码）
-**效果**：校验验证码，绑定成功后自动存储 token 并启动后台轮询
-**下一步**：告知用户绑定成功，介绍可用功能
+**Parameters**: `email` (required), `code` (required, 6-digit verification code)
+**Effect**: Verifies the code; on success, stores the token and starts background polling
+**Next step**: Inform the user binding is complete and introduce available features
 
-### initiate_meeting — 发起会议
+### initiate_meeting — Create a Meeting
 
-**参数**：
-- `title`（必填）：会议标题
-- `duration_minutes`（必填）：时长（分钟），"半小时" → 30
-- `invitees`（必填）：受邀人邮箱数组
-- `available_slots`（必填）：发起人可用时段，格式 `"YYYY-MM-DD HH:MM-HH:MM"`
-- `preference_note`（可选）：从记忆中提取的用户偏好，没有则留空，禁止编造
+**Parameters**:
+- `title` (required): Meeting title
+- `duration_minutes` (required): Duration in minutes, e.g. "half an hour" -> 30
+- `invitees` (required): Array of invitee email addresses
+- `available_slots` (required): Organizer's available time slots, format `"YYYY-MM-DD HH:MM-HH:MM"`
+- `preference_note` (optional): User's scheduling preferences from memory. Leave empty if none — never fabricate.
 
-**注意**：缺少任何必填项时必须追问用户，不得假设。时间必须从自然语言转换为标准格式。
+**IMPORTANT**: If any required field is missing, ask the user — never assume. Convert natural language time descriptions to the standard format.
 
-### check_and_respond_tasks — 查询待办 / 提交决策
+### check_and_respond_tasks — Query Tasks / Submit Decisions
 
-**两种模式**：
-- **模式 A**（无参数）：获取待处理任务列表
-- **模式 B**（有参数）：对某个会议提交响应
-  - `meeting_id` + `response_type`（`INITIAL` / `NEW_PROPOSAL` / `ACCEPT_PROPOSAL` / `REJECT`）
-  - `INITIAL` 和 `NEW_PROPOSAL` 必须附带 `available_slots`
-  - `REJECT` 无需 slots
+**Two modes**:
+- **Mode A** (no params): Get list of pending tasks
+- **Mode B** (with params): Submit a response to a specific meeting
+  - `meeting_id` + `response_type` (`INITIAL` / `NEW_PROPOSAL` / `ACCEPT_PROPOSAL` / `REJECT`)
+  - `INITIAL` and `NEW_PROPOSAL` require `available_slots`
+  - `REJECT` does not need slots
 
-**用户决策关键词映射**：
-- "取消"/"算了"/"拒绝"/"不参加" → `REJECT`
-- "接受"/"同意"/"可以" → `ACCEPT_PROPOSAL`
-- "换个时间"/"重试" → 询问新时段后 `NEW_PROPOSAL`
+**User decision keyword mapping**:
+- "cancel" / "drop it" / "reject" / "not attending" -> `REJECT`
+- "accept" / "agree" / "works for me" -> `ACCEPT_PROPOSAL`
+- "change time" / "retry" -> ask for new slots, then `NEW_PROPOSAL`
 
-**重要**：用户做出任何会议决策时，必须调用此工具。仅口头回复而不调用工具是错误的。
+**CRITICAL**: When the user makes ANY meeting decision, you MUST call this tool. A verbal-only response without calling the tool is ALWAYS wrong.
 
-### list_meetings — 查看会议
+### list_meetings — View Meetings
 
-**两种模式**：
-- **模式 A**（无参数）：返回用户参与的所有会议列表
-- **模式 B**（传 `meeting_id`）：返回指定会议的详细信息（参与者状态、协调过程等）
+**Two modes**:
+- **Mode A** (no params): Returns all meetings the user is involved in
+- **Mode B** (with `meeting_id`): Returns detailed info for a specific meeting (participant status, negotiation history, etc.)
 
-## 用法示例
+## Usage Examples
 
-| 用户说 | 应调用的工具 | 说明 |
-|--------|------------|------|
-| "帮我绑定邮箱 xxx@xxx.com" | `bind_identity` | 发送验证码 |
-| "验证码是 123456" | `verify_email_code` | 完成绑定 |
-| "帮我约 Bob 和 Charlie 明天开会" | `initiate_meeting` | 收集完整信息后调用 |
-| "帮我约个 30 分钟的架构讨论会，尽量下午" | `initiate_meeting` | 需确认受邀人和具体时段 |
-| "有没有新的会议邀请？" | `check_and_respond_tasks`（无参数） | 查询待办 |
-| "我的会议列表" | `list_meetings`（无参数） | 查看所有会议 |
-| "可以，就这个时间" | `check_and_respond_tasks`（ACCEPT_PROPOSAL） | 接受提议 |
-| "周四不行，我只有周五上午有空" | `check_and_respond_tasks`（NEW_PROPOSAL） | 提新时段 |
-| "这个会议我不参加了" | `check_and_respond_tasks`（REJECT） | 拒绝参加 |
+| User says | Tool to call | Notes |
+|-----------|-------------|-------|
+| "Bind my email xxx@xxx.com" | `bind_identity` | Send verification code |
+| "The code is 123456" | `verify_email_code` | Complete binding |
+| "Schedule a meeting with Bob and Charlie tomorrow" | `initiate_meeting` | Collect all required info first |
+| "Set up a 30-min architecture review, preferably afternoon" | `initiate_meeting` | Need to confirm invitees and specific time slots |
+| "Any new meeting invitations?" | `check_and_respond_tasks` (no params) | Query pending tasks |
+| "My meeting list" | `list_meetings` (no params) | View all meetings |
+| "Sure, that time works" | `check_and_respond_tasks` (ACCEPT_PROPOSAL) | Accept the proposal |
+| "Thursday doesn't work, I'm only free Friday morning" | `check_and_respond_tasks` (NEW_PROPOSAL) | Propose new time slots |
+| "I'm not attending this meeting" | `check_and_respond_tasks` (REJECT) | Decline participation |
 
-## 常见问题
+## FAQ
 
-**后台轮询会消耗 Token 吗？**
-不会。后台检查是纯 HTTP 请求，不经过大模型。
+**Does background polling consume LLM tokens?**
+No. Background checks are pure HTTP requests and do not go through the language model.
 
-**别人约我开会，需要手动回复吗？**
-大部分情况不需要。插件自动读取日程并上报空闲时间。只有时间冲突需要用户取舍时才通知。
+**Do I need to manually respond when someone invites me?**
+In most cases, no. The plugin automatically checks your schedule and submits availability. You're only notified when there's a conflict that requires your decision.
 
-**日程隐私安全吗？**
-安全。插件只向服务端发送"可以开会的时间段"，不发送忙什么、会议标题等隐私信息。
+**Is my schedule data private?**
+Yes. The plugin only sends "available time slots" to the server — never what you're busy with, meeting titles, or other private information.
 
-## 注意事项
+## Important Notes
 
-- 所有会议操作必须通过插件工具完成，禁止直接调用外部 API
-- 后台轮询不消耗 Token（纯 HTTP）
-- 用户的日程隐私不会泄露（只发送可用时间段）
-- 每个会议用标题称呼，不需要用户记 ID
+- All meeting operations must go through plugin tools — never call external APIs directly
+- Background polling does not consume LLM tokens (pure HTTP)
+- User schedule privacy is protected (only available time slots are shared)
+- Refer to each meeting by its title — users don't need to remember IDs
