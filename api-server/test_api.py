@@ -1,12 +1,12 @@
 """
-Meeting Coordinator API - 完整测试脚本
-覆盖全部 8 个 API 接口 + 4 种端到端流程
+Meeting Coordinator API - Full Test Script
+Covers all 8 API endpoints + 4 end-to-end flows
 
-测试场景:
-  场景 A: 无冲突 → CONFIRMED（快乐路径）
-  场景 B: 有冲突 → NEGOTIATING → Agent 妥协 → 重新提交 → CONFIRMED
-  场景 C: REJECT → FAILED
-  场景 D: ACCEPT_PROPOSAL 流程
+Test scenarios:
+  Scenario A: No conflict -> CONFIRMED (happy path)
+  Scenario B: Conflict -> NEGOTIATING -> Agent compromise -> Resubmit -> CONFIRMED
+  Scenario C: REJECT -> FAILED
+  Scenario D: ACCEPT_PROPOSAL flow
 """
 
 import requests
@@ -15,7 +15,7 @@ import sys
 
 BASE_URL = "http://127.0.0.1:8000"
 
-# ========== 工具函数 ==========
+# ========== Utility Functions ==========
 
 passed = 0
 failed = 0
@@ -53,344 +53,344 @@ def get(path, token=None):
     return r.status_code, r.json()
 
 
-# ========== 0. 连通性检查 ==========
+# ========== 0. Connectivity Check ==========
 
-section("0. 服务连通性检查")
+section("0. Service Connectivity Check")
 try:
     code, data = get("/health")
-    check("服务器健康检查", code == 200)
+    check("Server health check", code == 200)
 except Exception as e:
-    print(f"  [FATAL] 无法连接服务器: {e}")
-    print("  请先启动: python -m uvicorn app.main:app --reload")
+    print(f"  [FATAL] Cannot connect to server: {e}")
+    print("  Please start first: python -m uvicorn app.main:app --reload")
     sys.exit(1)
 
 
-# ========== 1. 身份认证 ==========
+# ========== 1. Authentication ==========
 
-section("1. 身份认证 (POST /api/auth/bind)")
+section("1. Authentication (POST /api/auth/bind)")
 
 code, data = post("/api/auth/bind", {"email": "alice@example.com"})
-check("注册 alice", code == 200 and data["code"] == 200)
+check("Register alice", code == 200 and data["code"] == 200)
 alice_token = data["data"]["token"]
 alice_id = data["data"]["user_id"]
 
 code, data = post("/api/auth/bind", {"email": "alice@example.com"})
-check("重复注册返回相同 token", data["data"]["token"] == alice_token)
+check("Duplicate registration returns same token", data["data"]["token"] == alice_token)
 
 code, data = post("/api/auth/bind", {"email": "bob@example.com"})
-check("注册 bob", code == 200)
+check("Register bob", code == 200)
 bob_token = data["data"]["token"]
 
 code, data = post("/api/auth/bind", {"email": "carol@example.com"})
-check("注册 carol", code == 200)
+check("Register carol", code == 200)
 carol_token = data["data"]["token"]
 
 code, data = get("/api/meetings", token="invalid-token-xxx")
-check("无效 Token 返回 401", code == 401)
+check("Invalid token returns 401", code == 401)
 
 code, data = get("/api/meetings")
-check("缺少 Token 返回 422", code == 422)
-check("错误响应格式统一 (code 字段)", "code" in data and data["code"] == 422)
+check("Missing token returns 422", code == 422)
+check("Unified error response format (code field)", "code" in data and data["code"] == 422)
 
 
 # ==========================================================
-#  场景 A: 无冲突 → CONFIRMED（快乐路径）
+#  Scenario A: No conflict -> CONFIRMED (happy path)
 # ==========================================================
 
-section("场景 A: 无冲突快乐路径")
+section("Scenario A: No-conflict Happy Path")
 print()
 
-# ---- 2. 创建会议 ----
-section("A-1. 创建会议 (POST /api/meetings)")
+# ---- 2. Create meeting ----
+section("A-1. Create Meeting (POST /api/meetings)")
 
 COMMON_SLOT = "2026-03-20 14:00-15:00"
 
 code, data = post("/api/meetings", {
-    "title": "场景A-无冲突测试",
+    "title": "Scenario A - No Conflict Test",
     "duration_minutes": 30,
     "invitees": ["bob@example.com", "carol@example.com"],
     "initiator_data": {
         "available_slots": [COMMON_SLOT, "2026-03-20 16:00-17:00"],
-        "preference_note": "下午优先"
+        "preference_note": "Afternoon preferred"
     }
 }, token=alice_token)
-check("创建会议成功", code == 200 and data["code"] == 200)
+check("Meeting created successfully", code == 200 and data["code"] == 200)
 meeting_a = data["data"]["meeting_id"]
-check("状态为 COLLECTING", data["data"]["status"] == "COLLECTING")
-check("返回 meeting_id", meeting_a is not None)
+check("Status is COLLECTING", data["data"]["status"] == "COLLECTING")
+check("Returns meeting_id", meeting_a is not None)
 
-# ---- 3. 会议列表 ----
-section("A-2. 会议列表 (GET /api/meetings)")
+# ---- 3. Meeting list ----
+section("A-2. Meeting List (GET /api/meetings)")
 
 code, data = get("/api/meetings", token=alice_token)
-check("alice 查询列表成功", code == 200)
-check("列表包含会议", len(data["data"]["meetings"]) >= 1)
+check("alice query list successful", code == 200)
+check("List contains meeting", len(data["data"]["meetings"]) >= 1)
 
 code, data = get("/api/meetings", token=bob_token)
-check("bob 查询列表成功", code == 200)
+check("bob query list successful", code == 200)
 bob_meeting = next((m for m in data["data"]["meetings"] if m["meeting_id"] == meeting_a), None)
-check("bob 看到会议", bob_meeting is not None)
-check("bob 角色为 participant", bob_meeting["my_role"] == "participant")
+check("bob sees the meeting", bob_meeting is not None)
+check("bob role is participant", bob_meeting["my_role"] == "participant")
 
-# ---- 4. 待办任务 ----
-section("A-3. 待办任务 (GET /api/tasks/pending)")
+# ---- 4. Pending tasks ----
+section("A-3. Pending Tasks (GET /api/tasks/pending)")
 
 code, data = get("/api/tasks/pending", token=bob_token)
-check("bob 有待办任务", len(data["data"]["pending_tasks"]) >= 1)
+check("bob has pending tasks", len(data["data"]["pending_tasks"]) >= 1)
 bob_task = next((t for t in data["data"]["pending_tasks"] if t["meeting_id"] == meeting_a), None)
-check("任务类型为 INITIAL_SUBMIT", bob_task["task_type"] == "INITIAL_SUBMIT")
-check("message 包含邀请信息", "邀请" in bob_task["message"])
+check("Task type is INITIAL_SUBMIT", bob_task["task_type"] == "INITIAL_SUBMIT")
+check("Message contains invitation info", "invites" in bob_task["message"])
 
 code, data = get("/api/tasks/pending", token=alice_token)
 alice_tasks = [t for t in data["data"]["pending_tasks"] if t["meeting_id"] == meeting_a]
-check("alice 无待办（发起人已提交）", len(alice_tasks) == 0)
+check("alice has no pending (initiator already submitted)", len(alice_tasks) == 0)
 
-# ---- 5. Bob 提交 ----
-section("A-4. Bob 提交空闲时间 (POST /api/meetings/{id}/submit)")
+# ---- 5. Bob submits ----
+section("A-4. Bob Submits Available Time (POST /api/meetings/{id}/submit)")
 
 code, data = post(f"/api/meetings/{meeting_a}/submit", {
     "response_type": "INITIAL",
     "available_slots": [COMMON_SLOT, "2026-03-21 09:00-11:00"],
-    "preference_note": "我3点之前有事"
+    "preference_note": "Busy before 3pm"
 }, token=bob_token)
-check("bob 提交成功", code == 200)
-check("状态仍为 COLLECTING", data["data"]["status"] == "COLLECTING")
+check("bob submission successful", code == 200)
+check("Status still COLLECTING", data["data"]["status"] == "COLLECTING")
 check("all_submitted=False", data["data"]["all_submitted"] == False)
 
-# ---- 6. Carol 提交（最后一人）→ 自动转 ANALYZING ----
-section("A-5. Carol 提交 → 全员提交 → ANALYZING")
+# ---- 6. Carol submits (last person) -> auto transition to ANALYZING ----
+section("A-5. Carol Submits -> All Submitted -> ANALYZING")
 
 code, data = post(f"/api/meetings/{meeting_a}/submit", {
     "response_type": "INITIAL",
     "available_slots": [COMMON_SLOT],
-    "preference_note": "只有这个时间可以"
+    "preference_note": "Only this time works"
 }, token=carol_token)
-check("carol 提交成功", code == 200 and data["code"] == 200)
+check("carol submission successful", code == 200 and data["code"] == 200)
 check("all_submitted=True", data["data"]["all_submitted"] == True)
-check("状态转为 ANALYZING", data["data"]["status"] == "ANALYZING")
+check("Status transitions to ANALYZING", data["data"]["status"] == "ANALYZING")
 
-# ---- 7. Agent 轮询待协调任务 ----
-section("A-6. Agent 轮询 (GET /api/agent/tasks/pending)")
+# ---- 7. Agent polls pending coordination tasks ----
+section("A-6. Agent Polling (GET /api/agent/tasks/pending)")
 
 code, data = get("/api/agent/tasks/pending")
-check("Agent 轮询成功", code == 200)
-check("有待协调任务", len(data["data"]["pending_tasks"]) >= 1)
+check("Agent polling successful", code == 200)
+check("Has pending coordination tasks", len(data["data"]["pending_tasks"]) >= 1)
 
 agent_task = next((t for t in data["data"]["pending_tasks"] if t["meeting_id"] == meeting_a), None)
-check("找到场景A的会议", agent_task is not None)
-check("包含 participants_data", len(agent_task["participants_data"]) == 3)
-check("包含 duration_minutes", agent_task["duration_minutes"] == 30)
+check("Found scenario A meeting", agent_task is not None)
+check("Contains participants_data", len(agent_task["participants_data"]) == 3)
+check("Contains duration_minutes", agent_task["duration_minutes"] == 30)
 
-# 验证 slots 转为 {start, end} 格式
+# Verify slots converted to {start, end} format
 first_participant = agent_task["participants_data"][0]
-check("slots 为字典格式", isinstance(first_participant["latest_slots"][0], dict))
-check("slots 包含 start 字段", "start" in first_participant["latest_slots"][0])
-check("slots 包含 end 字段", "end" in first_participant["latest_slots"][0])
+check("Slots in dict format", isinstance(first_participant["latest_slots"][0], dict))
+check("Slots contain start field", "start" in first_participant["latest_slots"][0])
+check("Slots contain end field", "end" in first_participant["latest_slots"][0])
 
-# ---- 8. Agent 提交 CONFIRMED 结果 ----
-section("A-7. Agent 提交结果 (POST /api/agent/meetings/{id}/result) → CONFIRMED")
+# ---- 8. Agent submits CONFIRMED result ----
+section("A-7. Agent Submits Result (POST /api/agent/meetings/{id}/result) -> CONFIRMED")
 
 code, data = post(f"/api/agent/meetings/{meeting_a}/result", {
     "decision_status": "CONFIRMED",
     "final_time": "2026-03-20 14:00-14:30",
-    "agent_reasoning": "所有参与者在 14:00-15:00 都有空，选取前 30 分钟作为会议时间。",
+    "agent_reasoning": "All participants available at 14:00-15:00, selecting first 30 minutes as meeting time.",
     "counter_proposals": []
 })
-check("Agent 提交成功", code == 200 and data["code"] == 200)
-check("新状态为 CONFIRMED", data["data"]["new_status"] == "CONFIRMED")
+check("Agent submission successful", code == 200 and data["code"] == 200)
+check("New status is CONFIRMED", data["data"]["new_status"] == "CONFIRMED")
 
-# ---- 9. 查询最终结果 ----
-section("A-8. 查询会议详情 (GET /api/meetings/{id})")
+# ---- 9. Query final result ----
+section("A-8. Query Meeting Details (GET /api/meetings/{id})")
 
 code, data = get(f"/api/meetings/{meeting_a}", token=alice_token)
-check("查询成功", code == 200)
-check("状态 CONFIRMED", data["data"]["status"] == "CONFIRMED")
-check("final_time 正确", data["data"]["final_time"] == "2026-03-20 14:00-14:30")
-check("coordinator_reasoning 有值", data["data"]["coordinator_reasoning"] is not None)
-check("返回 participants 列表", len(data["data"]["participants"]) == 3)
+check("Query successful", code == 200)
+check("Status CONFIRMED", data["data"]["status"] == "CONFIRMED")
+check("final_time correct", data["data"]["final_time"] == "2026-03-20 14:00-14:30")
+check("coordinator_reasoning has value", data["data"]["coordinator_reasoning"] is not None)
+check("Returns participants list", len(data["data"]["participants"]) == 3)
 
-# Agent 轮询应该没有待处理任务了
+# Agent polling should have no pending tasks now
 code, data = get("/api/agent/tasks/pending")
 agent_tasks_a = [t for t in data["data"]["pending_tasks"] if t["meeting_id"] == meeting_a]
-check("CONFIRMED 后 Agent 无待处理任务", len(agent_tasks_a) == 0)
+check("No pending Agent tasks after CONFIRMED", len(agent_tasks_a) == 0)
 
 
 # ==========================================================
-#  场景 B: 有冲突 → NEGOTIATING → 重新提交 → CONFIRMED
+#  Scenario B: Conflict -> NEGOTIATING -> Resubmit -> CONFIRMED
 # ==========================================================
 
-section("场景 B: 冲突协商路径")
+section("Scenario B: Conflict Negotiation Path")
 print()
 
-# ---- 创建会议（时间有冲突） ----
-section("B-1. 创建冲突会议")
+# ---- Create meeting (conflicting times) ----
+section("B-1. Create Conflicting Meeting")
 
 code, data = post("/api/meetings", {
-    "title": "场景B-冲突测试",
+    "title": "Scenario B - Conflict Test",
     "duration_minutes": 30,
     "invitees": ["bob@example.com"],
     "initiator_data": {
         "available_slots": ["2026-03-22 09:00-12:00"],
-        "preference_note": "只有上午有空"
+        "preference_note": "Only available in the morning"
     }
 }, token=alice_token)
-check("创建成功", code == 200)
+check("Creation successful", code == 200)
 meeting_b = data["data"]["meeting_id"]
 
-# ---- Bob 提交不同时间 ----
-section("B-2. Bob 提交不同时间 → ANALYZING")
+# ---- Bob submits different time ----
+section("B-2. Bob Submits Different Time -> ANALYZING")
 
 code, data = post(f"/api/meetings/{meeting_b}/submit", {
     "response_type": "INITIAL",
     "available_slots": ["2026-03-22 14:00-18:00"],
-    "preference_note": "上午有课，只有下午可以"
+    "preference_note": "Have class in the morning, only afternoon works"
 }, token=bob_token)
-check("bob 提交成功", code == 200)
-check("状态转为 ANALYZING", data["data"]["status"] == "ANALYZING")
+check("bob submission successful", code == 200)
+check("Status transitions to ANALYZING", data["data"]["status"] == "ANALYZING")
 
-# ---- Agent 轮询 ----
-section("B-3. Agent 轮询并提交 NEGOTIATING 结果")
+# ---- Agent polling ----
+section("B-3. Agent Polls and Submits NEGOTIATING Result")
 
 code, data = get("/api/agent/tasks/pending")
 agent_task_b = next((t for t in data["data"]["pending_tasks"] if t["meeting_id"] == meeting_b), None)
-check("Agent 找到冲突会议", agent_task_b is not None)
+check("Agent found conflicting meeting", agent_task_b is not None)
 
-# Agent 提交 NEGOTIATING + counter_proposals
+# Agent submits NEGOTIATING + counter_proposals
 code, data = post(f"/api/agent/meetings/{meeting_b}/result", {
     "decision_status": "NEGOTIATING",
     "final_time": None,
-    "agent_reasoning": "Alice 只有上午有空，Bob 只有下午有空，完全没有交集。",
+    "agent_reasoning": "Alice only available in the morning, Bob only in the afternoon, no overlap.",
     "counter_proposals": [
         {
             "target_email": "alice@example.com",
-            "message": "Bob 只有下午才有空，您能否将时间延长到 13:00-14:00？"
+            "message": "Bob is only available in the afternoon, can you extend to 13:00-14:00?"
         }
     ]
 })
-check("Agent 提交 NEGOTIATING 成功", code == 200)
-check("新状态为 NEGOTIATING", data["data"]["new_status"] == "NEGOTIATING")
+check("Agent NEGOTIATING submission successful", code == 200)
+check("New status is NEGOTIATING", data["data"]["new_status"] == "NEGOTIATING")
 
-# ---- Plugin 轮询待办 → 看到 COUNTER_PROPOSAL ----
-section("B-4. Plugin 轮询看到妥协建议")
+# ---- Plugin polls pending -> sees COUNTER_PROPOSAL ----
+section("B-4. Plugin Polls and Sees Compromise Suggestion")
 
 code, data = get("/api/tasks/pending", token=alice_token)
 alice_task = next((t for t in data["data"]["pending_tasks"] if t["meeting_id"] == meeting_b), None)
-check("alice 有待办任务", alice_task is not None)
-check("任务类型为 COUNTER_PROPOSAL", alice_task["task_type"] == "COUNTER_PROPOSAL")
-check("message 包含 Agent 定向建议", "Bob" in alice_task["message"])
+check("alice has pending task", alice_task is not None)
+check("Task type is COUNTER_PROPOSAL", alice_task["task_type"] == "COUNTER_PROPOSAL")
+check("Message contains Agent's targeted suggestion", "Bob" in alice_task["message"])
 
 code, data = get("/api/tasks/pending", token=bob_token)
 bob_task = next((t for t in data["data"]["pending_tasks"] if t["meeting_id"] == meeting_b), None)
-check("bob 也有待办任务", bob_task is not None)
+check("bob also has pending task", bob_task is not None)
 
-# ---- 双方重新提交 → ANALYZING ----
-section("B-5. 双方重新提交新时间 → ANALYZING")
+# ---- Both resubmit -> ANALYZING ----
+section("B-5. Both Resubmit New Times -> ANALYZING")
 
 NEW_COMMON = "2026-03-22 13:00-14:00"
 
 code, data = post(f"/api/meetings/{meeting_b}/submit", {
     "response_type": "NEW_PROPOSAL",
     "available_slots": ["2026-03-22 09:00-12:00", NEW_COMMON],
-    "preference_note": "可以延长到下午1点"
+    "preference_note": "Can extend to 1pm"
 }, token=alice_token)
-check("alice 重新提交成功", code == 200)
-check("alice 提交后仍在 NEGOTIATING", data["data"]["status"] == "NEGOTIATING")
+check("alice resubmission successful", code == 200)
+check("Still NEGOTIATING after alice submits", data["data"]["status"] == "NEGOTIATING")
 
 code, data = post(f"/api/meetings/{meeting_b}/submit", {
     "response_type": "NEW_PROPOSAL",
     "available_slots": [NEW_COMMON, "2026-03-22 14:00-18:00"],
-    "preference_note": "13点可以"
+    "preference_note": "1pm works"
 }, token=bob_token)
-check("bob 重新提交成功", code == 200)
-check("全员提交后转 ANALYZING", data["data"]["status"] == "ANALYZING")
+check("bob resubmission successful", code == 200)
+check("Transitions to ANALYZING after all submit", data["data"]["status"] == "ANALYZING")
 
-# ---- Agent 再次分析 → CONFIRMED ----
-section("B-6. Agent 再次分析 → CONFIRMED")
+# ---- Agent re-analyzes -> CONFIRMED ----
+section("B-6. Agent Re-analyzes -> CONFIRMED")
 
 code, data = post(f"/api/agent/meetings/{meeting_b}/result", {
     "decision_status": "CONFIRMED",
     "final_time": "2026-03-22 13:00-13:30",
-    "agent_reasoning": "双方都同意 13:00-14:00 时间段，选取前 30 分钟。",
+    "agent_reasoning": "Both agreed on 13:00-14:00 time slot, selecting first 30 minutes.",
     "counter_proposals": []
 })
-check("Agent 提交 CONFIRMED", code == 200)
-check("最终状态 CONFIRMED", data["data"]["new_status"] == "CONFIRMED")
+check("Agent submits CONFIRMED", code == 200)
+check("Final status CONFIRMED", data["data"]["new_status"] == "CONFIRMED")
 
 code, data = get(f"/api/meetings/{meeting_b}", token=alice_token)
-check("final_time 正确", data["data"]["final_time"] == "2026-03-22 13:00-13:30")
+check("final_time correct", data["data"]["final_time"] == "2026-03-22 13:00-13:30")
 check("round_count = 1", data["data"]["round_count"] == 1)
 
 
 # ==========================================================
-#  场景 C: REJECT → FAILED
+#  Scenario C: REJECT -> FAILED
 # ==========================================================
 
-section("场景 C: 拒绝协商 → FAILED")
+section("Scenario C: Reject Negotiation -> FAILED")
 print()
 
-section("C-1. 创建会议并收集时间")
+section("C-1. Create Meeting and Collect Times")
 
 code, data = post("/api/meetings", {
-    "title": "场景C-拒绝测试",
+    "title": "Scenario C - Rejection Test",
     "duration_minutes": 60,
     "invitees": ["bob@example.com"],
     "initiator_data": {
         "available_slots": ["2026-03-25 10:00-12:00"],
-        "preference_note": "周二上午"
+        "preference_note": "Tuesday morning"
     }
 }, token=alice_token)
 meeting_c = data["data"]["meeting_id"]
 
-# Bob 提交不同时间
+# Bob submits different time
 code, data = post(f"/api/meetings/{meeting_c}/submit", {
     "response_type": "INITIAL",
     "available_slots": ["2026-03-25 16:00-18:00"],
-    "preference_note": "只有下午有空"
+    "preference_note": "Only available in the afternoon"
 }, token=bob_token)
-check("bob 提交 → ANALYZING", data["data"]["status"] == "ANALYZING")
+check("bob submits -> ANALYZING", data["data"]["status"] == "ANALYZING")
 
-# Agent 提交 NEGOTIATING
+# Agent submits NEGOTIATING
 code, data = post(f"/api/agent/meetings/{meeting_c}/result", {
     "decision_status": "NEGOTIATING",
     "final_time": None,
-    "agent_reasoning": "时间完全不重叠",
+    "agent_reasoning": "Times have no overlap",
     "counter_proposals": [
-        {"target_email": "bob@example.com", "message": "Alice 只有上午有空，您能调整吗？"}
+        {"target_email": "bob@example.com", "message": "Alice is only available in the morning, can you adjust?"}
     ]
 })
-check("Agent 提交 NEGOTIATING", data["data"]["new_status"] == "NEGOTIATING")
+check("Agent submits NEGOTIATING", data["data"]["new_status"] == "NEGOTIATING")
 
-# ---- Bob 拒绝 ----
-section("C-2. Bob 拒绝方案 → FAILED")
+# ---- Bob rejects ----
+section("C-2. Bob Rejects Proposal -> FAILED")
 
 code, data = post(f"/api/meetings/{meeting_c}/submit", {
     "response_type": "REJECT",
-    "preference_note": "这个时间我确实没法调整"
+    "preference_note": "I really cannot adjust this time"
 }, token=bob_token)
-check("bob 拒绝成功", code == 200)
-check("状态变为 FAILED", data["data"]["status"] == "FAILED")
+check("bob rejection successful", code == 200)
+check("Status becomes FAILED", data["data"]["status"] == "FAILED")
 
 code, data = get(f"/api/meetings/{meeting_c}", token=alice_token)
-check("查询确认 FAILED", data["data"]["status"] == "FAILED")
-check("reasoning 记录拒绝原因", "拒绝" in data["data"]["coordinator_reasoning"])
+check("Query confirms FAILED", data["data"]["status"] == "FAILED")
+check("Reasoning records rejection", "reject" in data["data"]["coordinator_reasoning"].lower() or "failed" in data["data"]["coordinator_reasoning"].lower())
 
 
 # ==========================================================
-#  场景 D: ACCEPT_PROPOSAL 流程
+#  Scenario D: ACCEPT_PROPOSAL flow
 # ==========================================================
 
-section("场景 D: ACCEPT_PROPOSAL 流程")
+section("Scenario D: ACCEPT_PROPOSAL Flow")
 print()
 
-section("D-1. 创建会议 → 冲突 → Agent NEGOTIATING")
+section("D-1. Create Meeting -> Conflict -> Agent NEGOTIATING")
 
 code, data = post("/api/meetings", {
-    "title": "场景D-接受方案测试",
+    "title": "Scenario D - Accept Proposal Test",
     "duration_minutes": 30,
     "invitees": ["bob@example.com"],
     "initiator_data": {
         "available_slots": ["2026-03-26 09:00-12:00"],
-        "preference_note": "上午"
+        "preference_note": "morning"
     }
 }, token=alice_token)
 meeting_d = data["data"]["meeting_id"]
@@ -403,81 +403,81 @@ code, data = post(f"/api/meetings/{meeting_d}/submit", {
 code, data = post(f"/api/agent/meetings/{meeting_d}/result", {
     "decision_status": "NEGOTIATING",
     "final_time": None,
-    "agent_reasoning": "无交集",
+    "agent_reasoning": "No overlap",
     "counter_proposals": [
-        {"target_email": "alice@example.com", "message": "建议改到下午"},
-        {"target_email": "bob@example.com", "message": "建议改到上午"}
+        {"target_email": "alice@example.com", "message": "Suggest moving to afternoon"},
+        {"target_email": "bob@example.com", "message": "Suggest moving to morning"}
     ]
 })
-check("进入 NEGOTIATING", data["data"]["new_status"] == "NEGOTIATING")
+check("Enters NEGOTIATING", data["data"]["new_status"] == "NEGOTIATING")
 
-section("D-2. 双方 ACCEPT_PROPOSAL → ANALYZING")
+section("D-2. Both ACCEPT_PROPOSAL -> ANALYZING")
 
 code, data = post(f"/api/meetings/{meeting_d}/submit", {
     "response_type": "ACCEPT_PROPOSAL"
 }, token=alice_token)
-check("alice 接受，等待 bob", data["data"]["all_submitted"] == False)
+check("alice accepts, waiting for bob", data["data"]["all_submitted"] == False)
 
 code, data = post(f"/api/meetings/{meeting_d}/submit", {
     "response_type": "ACCEPT_PROPOSAL"
 }, token=bob_token)
-check("bob 接受，全员完成", data["data"]["all_submitted"] == True)
-check("状态转为 ANALYZING", data["data"]["status"] == "ANALYZING")
+check("bob accepts, all completed", data["data"]["all_submitted"] == True)
+check("Status transitions to ANALYZING", data["data"]["status"] == "ANALYZING")
 
-# Agent 最终确认
+# Agent final confirmation
 code, data = post(f"/api/agent/meetings/{meeting_d}/result", {
     "decision_status": "CONFIRMED",
     "final_time": "2026-03-26 11:00-11:30",
-    "agent_reasoning": "双方接受妥协方案",
+    "agent_reasoning": "Both accepted compromise proposal",
     "counter_proposals": []
 })
-check("最终 CONFIRMED", data["data"]["new_status"] == "CONFIRMED")
+check("Final CONFIRMED", data["data"]["new_status"] == "CONFIRMED")
 
 
 # ==========================================================
-#  错误处理测试
+#  Error Handling Tests
 # ==========================================================
 
-section("错误处理测试")
+section("Error Handling Tests")
 
-# 对已 CONFIRMED 的会议提交
+# Submit to already CONFIRMED meeting
 code, data = post(f"/api/meetings/{meeting_a}/submit", {
     "response_type": "INITIAL",
     "available_slots": ["2026-03-20 14:00-15:00"]
 }, token=bob_token)
-check("CONFIRMED 会议不允许提交 (400)", code == 400)
-check("错误格式统一", data["code"] == 400)
+check("CONFIRMED meeting rejects submission (400)", code == 400)
+check("Unified error format", data["code"] == 400)
 
-# 对不存在的会议提交
+# Submit to non-existent meeting
 code, data = post("/api/agent/meetings/mtg_nonexist/result", {
     "decision_status": "CONFIRMED",
     "final_time": "2026-03-20 14:00-14:30",
     "agent_reasoning": "test",
     "counter_proposals": []
 })
-check("不存在的会议返回 404", code == 404)
+check("Non-existent meeting returns 404", code == 404)
 
-# 对非 ANALYZING 的会议提交 Agent 结果
+# Submit Agent result to non-ANALYZING meeting
 code, data = post(f"/api/agent/meetings/{meeting_a}/result", {
     "decision_status": "CONFIRMED",
     "final_time": "2026-03-20 14:00-14:30",
     "agent_reasoning": "test",
     "counter_proposals": []
 })
-check("非 ANALYZING 状态拒绝 Agent 提交 (400)", code == 400)
+check("Non-ANALYZING status rejects Agent submission (400)", code == 400)
 
-# 无效的 response_type
+# Invalid response_type
 code, data = post(f"/api/meetings/{meeting_a}/submit", {
     "response_type": "INVALID_TYPE",
     "available_slots": []
 }, token=bob_token)
-check("无效 response_type 返回 422", code == 422)
+check("Invalid response_type returns 422", code == 422)
 
 
-# ========== 最终报告 ==========
+# ========== Final Report ==========
 
 print(f"\n{'=' * 60}")
-print(f"  测试完成: {passed} 通过 / {failed} 失败 / {passed + failed} 总计")
+print(f"  Test completed: {passed} passed / {failed} failed / {passed + failed} total")
 print(f"{'=' * 60}")
 
 if failed > 0:

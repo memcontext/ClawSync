@@ -1,4 +1,4 @@
-"""Zoom 会议链接生成服务 — 集成 meeting_link/ZOOM_MEETING 模块"""
+"""Zoom meeting link generation service -- integrates meeting_link/ZOOM_MEETING module"""
 
 import base64
 import os
@@ -7,17 +7,17 @@ import requests as http_requests
 
 logger = logging.getLogger(__name__)
 
-# Zoom Server-to-Server OAuth 配置
+# Zoom Server-to-Server OAuth configuration
 ZOOM_ACCOUNT_ID = os.getenv("ZOOM_ACCOUNT_ID", "tboELECqQmOzjEsqXoEt9w")
 ZOOM_CLIENT_ID = os.getenv("ZOOM_CLIENT_ID", "OY_0Nvj5RYqrSVkGsHpukQ")
 ZOOM_CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET", "gtLns7ADZMlzSE9ldPjqHiNeaJ18khHJ")
 
-# 绕过系统代理
+# Bypass system proxy
 NO_PROXY = {"http": None, "https": None}
 
 
 def _get_access_token() -> str:
-    """通过 Server-to-Server OAuth 获取 access token"""
+    """Get access token via Server-to-Server OAuth"""
     credentials = base64.b64encode(
         f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()
     ).decode()
@@ -42,10 +42,10 @@ def create_zoom_meeting(
     agenda: str = "",
 ) -> dict | None:
     """
-    创建 Zoom 会议并返回链接信息。
-    失败返回 None（不阻塞 CONFIRMED 流程）。
+    Create a Zoom meeting and return link information.
+    Returns None on failure (does not block the CONFIRMED flow).
 
-    返回: {"meeting_id", "join_url", "start_url", "passcode"}
+    Returns: {"meeting_id", "join_url", "start_url", "passcode"}
     """
     try:
         token = _get_access_token()
@@ -79,9 +79,9 @@ def create_zoom_meeting(
             "start_url": data["start_url"],
             "passcode": data.get("password", ""),
         }
-        logger.info(f"Zoom 会议已创建: {result['join_url']}")
+        logger.info(f"Zoom meeting created: {result['join_url']}")
         return result
 
     except Exception as e:
-        logger.error(f"Zoom 会议创建失败: {e}")
+        logger.error(f"Zoom meeting creation failed: {e}")
         return None

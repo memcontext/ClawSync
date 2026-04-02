@@ -12,7 +12,7 @@ import logging
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 state_logger = logging.getLogger("state")
 
-# 全局实例
+# Global instance
 state_machine = StateMachine(max_rounds=3)
 
 
@@ -25,7 +25,7 @@ async def create_meeting(
     try:
         meeting_id = generate_meeting_id()
 
-        # ---- 1. 创建会议，初始状态 PENDING ----
+        # ---- 1. Create meeting with initial status PENDING ----
         new_meeting = Meeting(
             id=meeting_id,
             initiator_id=current_user.id,
@@ -37,7 +37,7 @@ async def create_meeting(
         )
         db.add(new_meeting)
 
-        # ---- 2. 写入发起人协商日志 ----
+        # ---- 2. Write initiator negotiation log ----
         initiator_log = NegotiationLog(
             meeting_id=meeting_id,
             user_id=current_user.id,
@@ -48,16 +48,16 @@ async def create_meeting(
         )
         db.add(initiator_log)
 
-        # ---- 2.4 检查发起人邮箱验证状态 ----
+        # ---- 2.4 Check initiator email verification status ----
         if not current_user.email_verified:
             db.rollback()
             return APIResponse(
                 code=403,
-                message="您的邮箱尚未完成验证绑定，请先通过 /api/auth/send-code 和 /api/auth/verify-bind 完成邮箱验证",
+                message="Your email has not been verified yet. Please complete email verification via /api/auth/send-code and /api/auth/verify-bind first",
                 data=None
             )
 
-        # ---- 2.5 检查被邀请人邮箱注册状态 ----
+        # ---- 2.5 Check invitee email registration status ----
         unregistered = []
         for invitee_email in meeting_data.invitees:
             invitee = db.query(User).filter(User.email == invitee_email).first()
@@ -68,13 +68,13 @@ async def create_meeting(
             db.rollback()
             return APIResponse(
                 code=400,
-                message=f"以下被邀请人尚未完成邮箱注册绑定，请通知他们先注册：{', '.join(unregistered)}",
+                message=f"The following invitees have not completed email registration. Please notify them to register first: {', '.join(unregistered)}",
                 data={
                     "unregistered_emails": unregistered
                 }
             )
 
-        # ---- 3. 为每位受邀人查询用户及协商日志 ----
+        # ---- 3. Query user and create negotiation log for each invitee ----
         for invitee_email in meeting_data.invitees:
             invitee = db.query(User).filter(User.email == invitee_email).first()
 
@@ -88,23 +88,23 @@ async def create_meeting(
             )
             db.add(participant_log)
 
-        # ---- 4. 状态机流转：PENDING → COLLECTING（发出邀请） ----
+        # ---- 4. State machine transition: PENDING -> COLLECTING (invitations sent) ----
         new_state = state_machine.transition(
             current=MeetingState.PENDING,
             target=MeetingState.COLLECTING,
             context={"meeting_id": meeting_id}
         )
         new_meeting.status = new_state.value
-        state_logger.info(f"CREATED→COLLECTING | {meeting_id} | {meeting_data.title} | initiator={current_user.email} | invitees={meeting_data.invitees}")
+        state_logger.info(f"CREATED->COLLECTING | {meeting_id} | {meeting_data.title} | initiator={current_user.email} | invitees={meeting_data.invitees}")
 
         db.commit()
 
         return APIResponse(
             code=200,
-            message="会议协商已发起，等待受邀人响应",
+            message="Meeting negotiation initiated, waiting for invitee responses",
             data={
-                "id": meeting_id,              # 插件期望 "id"
-                "meeting_id": meeting_id,       # 保持向后兼容
+                "id": meeting_id,              # Plugin expects "id"
+                "meeting_id": meeting_id,       # Kept for backward compatibility
                 "title": meeting_data.title,
                 "status": new_meeting.status,
                 "duration_minutes": meeting_data.duration_minutes,
@@ -126,7 +126,7 @@ async def list_my_meetings(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
-    """获取当前用户参与的所有会议（发起的 + 受邀的）"""
+    """Get all meetings the current user is involved in (initiated + invited)"""
     try:
         my_logs = db.query(NegotiationLog).filter(
             NegotiationLog.user_id == current_user.id
@@ -189,7 +189,7 @@ async def get_meeting_status(
         meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
 
         if not meeting:
-            raise HTTPException(status_code=404, detail="会议不存在")
+            raise HTTPException(status_code=404, detail="Meeting not found")
 
         is_participant = db.query(NegotiationLog).filter(
             NegotiationLog.meeting_id == meeting_id,
@@ -197,7 +197,7 @@ async def get_meeting_status(
         ).first()
 
         if meeting.initiator_id != current_user.id and not is_participant:
-            raise HTTPException(status_code=403, detail="无权查看此会议")
+            raise HTTPException(status_code=403, detail="No permission to view this meeting")
 
         logs = db.query(NegotiationLog).filter(
             NegotiationLog.meeting_id == meeting_id
@@ -245,22 +245,22 @@ async def submit_availability(
     try:
         meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
         if not meeting:
-            raise HTTPException(status_code=404, detail="会议不存在")
+            raise HTTPException(status_code=404, detail="Meeting not found")
 
         current_state = MeetingState(meeting.status)
 
-        # COLLECTING 允许提交时间，FAILED 允许发起人取消(REJECT)或重新发起
+        # COLLECTING allows time submission, FAILED allows initiator to cancel (REJECT) or re-initiate
         allowed_states = (MeetingState.COLLECTING, MeetingState.FAILED)
         if current_state not in allowed_states:
             raise HTTPException(
                 status_code=400,
-                detail=f"当前会议状态为 {meeting.status}，不允许提交"
+                detail=f"Current meeting status is {meeting.status}, submission not allowed"
             )
-        # FAILED 状态下只有发起人可以操作
+        # In FAILED status, only the initiator can take action
         if current_state == MeetingState.FAILED and current_user.id != meeting.initiator_id:
             raise HTTPException(
                 status_code=403,
-                detail="会议协商已失败，只有发起人可以取消或重新发起"
+                detail="Meeting negotiation has failed. Only the initiator can cancel or re-initiate"
             )
 
         negotiation_log = db.query(NegotiationLog).filter(
@@ -269,15 +269,15 @@ async def submit_availability(
         ).first()
 
         if not negotiation_log:
-            raise HTTPException(status_code=403, detail="您不是此会议的参与者")
+            raise HTTPException(status_code=403, detail="You are not a participant of this meeting")
 
-        # ---- 根据 response_type 分支处理 ----
+        # ---- Branch processing based on response_type ----
 
         if submit_data.response_type == ResponseType.REJECT:
-            # ====== REJECT：记录拒绝但不中断收集，等全员完成后统一进入 ANALYZING ======
-            # FAILED 状态下发起人 REJECT = 取消会议 → OVER
+            # ====== REJECT: Record rejection without interrupting collection, wait for all to complete before entering ANALYZING ======
+            # In FAILED status, initiator REJECT = cancel meeting -> OVER
             if current_state == MeetingState.FAILED and current_user.id == meeting.initiator_id:
-                # 发起人在 FAILED 阶段取消会议 → OVER
+                # Initiator cancels meeting in FAILED phase -> OVER
                 new_state = state_machine.transition(
                     current=MeetingState.FAILED,
                     target=MeetingState.OVER,
@@ -285,9 +285,9 @@ async def submit_availability(
                 )
                 meeting.status = new_state.value
                 meeting.updated_at = datetime.utcnow()
-                state_logger.info(f"FAILED→OVER | {meeting_id} | {meeting.title} | 发起人取消会议")
+                state_logger.info(f"FAILED->OVER | {meeting_id} | {meeting.title} | initiator cancelled meeting")
 
-                # 通知所有被邀请人会议已取消
+                # Notify all invitees that the meeting has been cancelled
                 all_logs = db.query(NegotiationLog).filter(
                     NegotiationLog.meeting_id == meeting_id
                 ).all()
@@ -295,51 +295,51 @@ async def submit_availability(
                     if log.user_id != current_user.id:
                         log.action_required = True
                         log.counter_proposal_message = (
-                            f"📋 会议已取消\n"
-                            f"会议：{meeting.title}\n"
-                            f"发起人已取消此会议。"
+                            f"Meeting cancelled\n"
+                            f"Meeting: {meeting.title}\n"
+                            f"The initiator has cancelled this meeting."
                         )
                         log.updated_at = datetime.utcnow()
 
                 db.commit()
                 return APIResponse(
                     code=200,
-                    message="会议已取消，已通知所有参与者",
+                    message="Meeting cancelled, all participants have been notified",
                     data={
                         "id": meeting_id, "meeting_id": meeting_id,
                         "response_type": "REJECT", "status": meeting.status,
                     }
                 )
 
-            # COLLECTING/NEGOTIATING 阶段：记录拒绝，不中断收集
-            reject_reason = submit_data.preference_note or "未说明拒绝原因"
+            # COLLECTING/NEGOTIATING phase: record rejection, do not interrupt collection
+            reject_reason = submit_data.preference_note or "No rejection reason provided"
 
-            # 标记拒绝者已完成，记录拒绝原因和空 slots
+            # Mark rejector as done, record rejection reason and empty slots
             negotiation_log.action_required = False
-            negotiation_log.latest_slots = []  # 空 slots = 无法参加
-            negotiation_log.preference_note = f"[已拒绝] {reject_reason}"
+            negotiation_log.latest_slots = []  # Empty slots = cannot attend
+            negotiation_log.preference_note = f"[rejected] {reject_reason}"
             negotiation_log.counter_proposal_message = None
             negotiation_log.updated_at = datetime.utcnow()
             db.commit()
 
             state_logger.info(
                 f"REJECT_RECORDED | {meeting_id} | {meeting.title} | "
-                f"by={current_user.email} | reason={reject_reason} | 继续收集其他人"
+                f"by={current_user.email} | reason={reject_reason} | continuing to collect others"
             )
 
-            # 检查是否全员已完成（和 INITIAL 提交一样的逻辑）
+            # Check if all have completed (same logic as INITIAL submission)
             all_logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             all_submitted = all(not p.action_required for p in all_logs)
 
             if all_submitted:
-                # 全员完成 → ANALYZING，Agent 会看到此人 slots 为空 + [已拒绝] 标记
+                # All completed -> ANALYZING, Agent will see this person's slots as empty + [rejected] tag
                 _transition_to_analyzing(meeting, current_state, db)
 
             return APIResponse(
                 code=200,
-                message="已记录拒绝" + ("，全员已完成，等待协调分析" if all_submitted else "，等待其他参与者提交"),
+                message="Rejection recorded" + (", all participants have completed, awaiting coordination analysis" if all_submitted else ", waiting for other participants to submit"),
                 data={
                     "id": meeting_id, "meeting_id": meeting_id,
                     "response_type": submit_data.response_type.value,
@@ -349,8 +349,8 @@ async def submit_availability(
             )
 
         elif submit_data.response_type == ResponseType.ACCEPT_PROPOSAL:
-            # ====== ACCEPT_PROPOSAL：接受妥协方案 ======
-            # 将 Agent 建议的时间写入 latest_slots，确保 ANALYZING 时 Agent 使用正确数据
+            # ====== ACCEPT_PROPOSAL: Accept compromise proposal ======
+            # Write Agent's suggested time into latest_slots to ensure Agent uses correct data during ANALYZING
             if negotiation_log.suggested_slots:
                 negotiation_log.latest_slots = negotiation_log.suggested_slots
             negotiation_log.action_required = False
@@ -358,19 +358,19 @@ async def submit_availability(
             negotiation_log.updated_at = datetime.utcnow()
             db.commit()
 
-            # 检查是否所有人都已接受
+            # Check if everyone has accepted
             all_logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             all_accepted = all(not p.action_required for p in all_logs)
 
             if all_accepted:
-                # 全员接受 → 转入 ANALYZING，等待 Agent 轮询处理
+                # All accepted -> transition to ANALYZING, waiting for Agent to poll and process
                 _transition_to_analyzing(meeting, current_state, db)
 
             return APIResponse(
                 code=200,
-                message="已接受方案" + ("，等待协调 Agent 分析。" if all_accepted else "，等待其他参与者响应"),
+                message="Proposal accepted" + (", waiting for coordination Agent to analyze." if all_accepted else ", waiting for other participants to respond"),
                 data={
                     "id": meeting_id,
                     "meeting_id": meeting_id,
@@ -384,9 +384,9 @@ async def submit_availability(
             )
 
         else:
-            # ====== INITIAL / NEW_PROPOSAL：提交时间数据 ======
+            # ====== INITIAL / NEW_PROPOSAL: Submit time data ======
 
-            # FAILED 状态下发起人重新发起 → FAILED → COLLECTING
+            # In FAILED status, initiator re-initiates -> FAILED -> COLLECTING
             if current_state == MeetingState.FAILED and current_user.id == meeting.initiator_id:
                 new_state = state_machine.transition(
                     current=MeetingState.FAILED,
@@ -397,32 +397,32 @@ async def submit_availability(
                 meeting.round_count = 0
                 meeting.updated_at = datetime.utcnow()
 
-                # ---- 更新会议参数（如果发起人提供了新参数）----
+                # ---- Update meeting parameters (if initiator provided new ones) ----
                 changes = []
                 if submit_data.duration_minutes is not None and submit_data.duration_minutes != meeting.duration_minutes:
                     old_duration = meeting.duration_minutes
                     meeting.duration_minutes = submit_data.duration_minutes
-                    changes.append(f"时长: {old_duration}→{submit_data.duration_minutes}分钟")
+                    changes.append(f"duration: {old_duration}->{submit_data.duration_minutes}min")
 
                 state_logger.info(
-                    f"FAILED→COLLECTING | {meeting_id} | {meeting.title} | 发起人重新发起 | round_count 已重置为 0"
-                    + (f" | 参数变更: {', '.join(changes)}" if changes else "")
+                    f"FAILED->COLLECTING | {meeting_id} | {meeting.title} | initiator re-initiated | round_count reset to 0"
+                    + (f" | param changes: {', '.join(changes)}" if changes else "")
                 )
 
-                # 更新发起人的时间
+                # Update initiator's time
                 negotiation_log.latest_slots = submit_data.available_slots
-                negotiation_log.preference_note = submit_data.preference_note  # 无条件覆盖，清除旧备注
+                negotiation_log.preference_note = submit_data.preference_note  # Overwrite unconditionally, clear old notes
                 negotiation_log.action_required = False
                 negotiation_log.counter_proposal_message = None
                 negotiation_log.updated_at = datetime.utcnow()
 
-                # ---- 处理参与者变更 ----
+                # ---- Handle participant changes ----
                 if submit_data.invitees is not None:
                     new_invitee_set = set(submit_data.invitees)
-                    # 不能邀请自己
+                    # Cannot invite yourself
                     new_invitee_set.discard(current_user.email)
 
-                    # 检查新增受邀人是否已注册
+                    # Check if newly added invitees are registered
                     unregistered = []
                     for invitee_email in new_invitee_set:
                         invitee = db.query(User).filter(User.email == invitee_email).first()
@@ -432,11 +432,11 @@ async def submit_availability(
                         db.rollback()
                         return APIResponse(
                             code=400,
-                            message=f"以下被邀请人尚未完成邮箱注册绑定：{', '.join(unregistered)}",
+                            message=f"The following invitees have not completed email registration: {', '.join(unregistered)}",
                             data={"unregistered_emails": unregistered}
                         )
 
-                    # 当前参与者（不含发起人）
+                    # Current participants (excluding initiator)
                     existing_logs = db.query(NegotiationLog).filter(
                         NegotiationLog.meeting_id == meeting_id,
                         NegotiationLog.user_id != current_user.id
@@ -447,13 +447,13 @@ async def submit_availability(
                         if user:
                             existing_emails[user.email] = log
 
-                    # 移除不再被邀请的参与者
+                    # Remove participants no longer invited
                     for email, log in existing_emails.items():
                         if email not in new_invitee_set:
                             db.delete(log)
-                            changes.append(f"移除: {email}")
+                            changes.append(f"removed: {email}")
 
-                    # 添加新参与者
+                    # Add new participants
                     for invitee_email in new_invitee_set:
                         if invitee_email not in existing_emails:
                             invitee = db.query(User).filter(User.email == invitee_email).first()
@@ -465,26 +465,26 @@ async def submit_availability(
                                 preference_note=None,
                                 action_required=True,
                                 counter_proposal_message=(
-                                    f"📋 会议邀请\n"
-                                    f"会议：{meeting.title}\n"
-                                    f"发起人邀请您参加此会议，请提交您的空闲时间。"
+                                    f"Meeting invitation\n"
+                                    f"Meeting: {meeting.title}\n"
+                                    f"The initiator invites you to this meeting. Please submit your available time."
                                 ),
                             )
                             db.add(new_log)
-                            changes.append(f"新增: {invitee_email}")
+                            changes.append(f"added: {invitee_email}")
 
                     if changes:
-                        state_logger.info(f"参与者变更 | {meeting_id} | {', '.join(changes)}")
+                        state_logger.info(f"participant changes | {meeting_id} | {', '.join(changes)}")
 
-                # 构建通知消息
-                change_desc = "发起人调整了会议参数，" if changes else ""
+                # Build notification message
+                change_desc = "The initiator has adjusted meeting parameters. " if changes else ""
                 notify_msg = (
-                    f"📋 会议重新发起\n"
-                    f"会议：{meeting.title}\n"
-                    f"{change_desc}请重新提交您的空闲时间。"
+                    f"Meeting re-initiated\n"
+                    f"Meeting: {meeting.title}\n"
+                    f"{change_desc}Please resubmit your available time."
                 )
 
-                # 重置所有被邀请人为待提交（新增的已在上面设置）
+                # Reset all invitees to pending submission (newly added ones are already set above)
                 all_logs = db.query(NegotiationLog).filter(
                     NegotiationLog.meeting_id == meeting_id
                 ).all()
@@ -492,8 +492,8 @@ async def submit_availability(
                     if log.user_id != current_user.id:
                         log.action_required = True
                         log.latest_slots = []
-                        log.preference_note = None  # 清除旧备注，防止残留触发误判
-                        if not log.counter_proposal_message:  # 新增参与者已有消息
+                        log.preference_note = None  # Clear old notes to prevent residual false triggers
+                        if not log.counter_proposal_message:  # Newly added participants already have a message
                             log.counter_proposal_message = notify_msg
                         log.suggested_slots = None
                         log.updated_at = datetime.utcnow()
@@ -501,7 +501,7 @@ async def submit_availability(
                 db.commit()
                 return APIResponse(
                     code=200,
-                    message="会议已重新发起，等待参与者重新提交时间",
+                    message="Meeting re-initiated, waiting for participants to resubmit time",
                     data={
                         "id": meeting_id, "meeting_id": meeting_id,
                         "response_type": submit_data.response_type.value,
@@ -511,7 +511,7 @@ async def submit_availability(
                     }
                 )
 
-            # 正常 COLLECTING 阶段提交
+            # Normal COLLECTING phase submission
             negotiation_log.latest_slots = submit_data.available_slots
             if submit_data.preference_note:
                 negotiation_log.preference_note = submit_data.preference_note
@@ -520,19 +520,19 @@ async def submit_availability(
             negotiation_log.updated_at = datetime.utcnow()
             db.commit()
 
-            # 检查是否所有参与者都已提交
+            # Check if all participants have submitted
             all_logs = db.query(NegotiationLog).filter(
                 NegotiationLog.meeting_id == meeting_id
             ).all()
             all_submitted = all(not p.action_required for p in all_logs)
 
             if all_submitted:
-                # 全员提交 → 转入 ANALYZING，等待 Agent 轮询处理
+                # All submitted -> transition to ANALYZING, waiting for Agent to poll and process
                 _transition_to_analyzing(meeting, current_state, db)
 
             return APIResponse(
                 code=200,
-                message="提交成功" + ("，已触发服务端协调 Agent 重新计算。" if all_submitted else ""),
+                message="Submission successful" + (", server-side coordination Agent recalculation triggered." if all_submitted else ""),
                 data={
                     "id": meeting_id,
                     "meeting_id": meeting_id,
@@ -557,8 +557,8 @@ async def submit_availability(
 
 def _transition_to_analyzing(meeting: Meeting, current_state: MeetingState, db: Session):
     """
-    全员提交/全员接受后，将会议状态转入 ANALYZING。
-    后续由外部 Coordinator Agent 通过 /api/agent/tasks/pending 轮询并处理。
+    After all submit / all accept, transition meeting status to ANALYZING.
+    Subsequently handled by the external Coordinator Agent polling /api/agent/tasks/pending.
     """
     new_state = state_machine.transition(
         current=current_state,
@@ -567,5 +567,5 @@ def _transition_to_analyzing(meeting: Meeting, current_state: MeetingState, db: 
     )
     meeting.status = new_state.value
     meeting.updated_at = datetime.utcnow()
-    state_logger.info(f"{current_state.value}→ANALYZING | {meeting.id} | {meeting.title} | 全员已提交")
+    state_logger.info(f"{current_state.value}->ANALYZING | {meeting.id} | {meeting.title} | all submitted")
     db.commit()

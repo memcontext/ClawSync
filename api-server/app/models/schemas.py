@@ -17,30 +17,30 @@ class VerifyBindRequest(BaseModel):
 
 
 class ResponseType(str, Enum):
-    """提交响应类型"""
+    """Submission response type"""
     INITIAL = "INITIAL"
     ACCEPT_PROPOSAL = "ACCEPT_PROPOSAL"
     NEW_PROPOSAL = "NEW_PROPOSAL"
-    COUNTER = "COUNTER"             # 插件兼容别名，等同于 NEW_PROPOSAL
+    COUNTER = "COUNTER"             # Plugin compatibility alias, equivalent to NEW_PROPOSAL
     REJECT = "REJECT"
 
 
 class InitiatorData(BaseModel):
-    """发起人数据：空闲时间 + 偏好说明"""
-    available_slots: List[str]  # 格式: ["2026-03-18 14:00-18:00"]
+    """Initiator data: available time slots + preference note"""
+    available_slots: List[str]  # Format: ["2026-03-18 14:00-18:00"]
     preference_note: Optional[str] = None
 
 
 class MeetingCreate(BaseModel):
     """
-    创建会议请求体 — 与设计文档对齐:
+    Create meeting request body -- aligned with design document:
     {
         "title": "...",
         "duration_minutes": 30,
         "invitees": ["b@x.com"],
         "initiator_data": {
             "available_slots": ["2026-03-18 14:00-18:00"],
-            "preference_note": "尽量安排在下午"
+            "preference_note": "preferably in the afternoon"
         }
     }
     """
@@ -52,7 +52,7 @@ class MeetingCreate(BaseModel):
 
 class SubmitAvailabilityRequest(BaseModel):
     """
-    提交空闲时间请求体 — 统一为字符串格式:
+    Submit availability request body -- unified string format:
     {
         "response_type": "INITIAL",
         "available_slots": ["2026-03-18 15:00-17:00"],
@@ -60,32 +60,32 @@ class SubmitAvailabilityRequest(BaseModel):
         "duration_minutes": 60,
         "invitees": ["new@example.com"]
     }
-    duration_minutes 和 invitees 仅在 FAILED 状态下发起人重新发起时可用，
-    用于修改会议参数后开始新一轮协商。
+    duration_minutes and invitees are only available when the initiator re-initiates from FAILED status,
+    used to modify meeting parameters before starting a new round of negotiation.
     """
     response_type: ResponseType = ResponseType.INITIAL
-    available_slots: List[str] = []  # 格式统一: ["2026-03-18 15:00-17:00"]
+    available_slots: List[str] = []  # Unified format: ["2026-03-18 15:00-17:00"]
     preference_note: Optional[str] = None
-    duration_minutes: Optional[int] = None  # FAILED 重新发起时可修改时长
-    invitees: Optional[List[EmailStr]] = None  # FAILED 重新发起时可修改参与者
+    duration_minutes: Optional[int] = None  # Can modify duration when re-initiating from FAILED
+    invitees: Optional[List[EmailStr]] = None  # Can modify participants when re-initiating from FAILED
 
 
 class CounterProposalItem(BaseModel):
     """
-    Coordinator Agent 下发的妥协建议（针对某个参与者）
+    Coordinator Agent's compromise suggestion (for a specific participant)
     {
         "target_email": "alice@example.com",
-        "message": "Bob只有下午有空，建议您调整到以下时间段",
+        "message": "Bob is only available in the afternoon, suggest you adjust to the following time slots",
         "suggested_slots": ["2026-03-18 17:00-18:00", "2026-03-19 14:00-16:00"]
     }
     """
     target_email: str
     message: str
-    suggested_slots: List[str] = []  # Agent 建议的时间槽
+    suggested_slots: List[str] = []  # Agent's suggested time slots
 
 
 class DecisionStatus(str, Enum):
-    """Agent 决策状态"""
+    """Agent decision status"""
     CONFIRMED = "CONFIRMED"
     NEGOTIATING = "NEGOTIATING"
     FAILED = "FAILED"
@@ -93,7 +93,7 @@ class DecisionStatus(str, Enum):
 
 class AgentCoordinationResult(BaseModel):
     """
-    Coordinator Agent 提交的协调决策结果:
+    Coordination decision result submitted by the Coordinator Agent:
     {
         "decision_status": "CONFIRMED",
         "final_time": "2026-03-18 15:00-15:30",

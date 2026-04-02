@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-全局配置：集中管理 API Key、模型参数等后续可能需要修改的配置项。
-生产环境建议将敏感信息迁移至环境变量或密钥管理服务。
+Global configuration: centralized management of API keys, model parameters,
+and other configuration items that may need to be modified.
+For production, it is recommended to migrate sensitive information to environment variables or secret management services.
 """
 
-# ─── Claude 大模型配置 ────────────────────────────────────────────────────────
-# 通过 sz.uyilink.com 代理接入
+# ─── Claude LLM Configuration ────────────────────────────────────────────────
+# Accessed via sz.uyilink.com proxy
 DOUBAO_API_KEY = "sk-7y2TdJzw6TpQJAsrVYEDKWtQdtfHo20OjKJm8zc8yTgtIRQR"
 DOUBAO_BASE_URL = "https://sz.uyilink.com/v1"
 DOUBAO_MODEL = "claude-sonnet-4-6"
 
-# ─── LLM 默认参数 ────────────────────────────────────────────────────────────
+# ─── LLM Default Parameters ──────────────────────────────────────────────────
 LLM_TEMPERATURE = 0
 
-# ─── 日期占位符（后续改为从会议数据中读取真实日期）─────────────────────────────
+# ─── Date Placeholder (to be replaced with actual date from meeting data) ────
 PLACEHOLDER_DATE = "2026-01-01"
 
-# ─── API Server 配置 ──────────────────────────────────────────────────────────
+# ─── API Server Configuration ────────────────────────────────────────────────
 API_BASE_URL = "http://39.105.143.2:7010"
-AGENT_TOKEN = ""                              # 留空则不带 Authorization 头
+AGENT_TOKEN = ""                              # Leave empty to omit Authorization header
 
-# ─── 轮询配置 ─────────────────────────────────────────────────────────────────
+# ─── Polling Configuration ───────────────────────────────────────────────────
 POLL_INTERVAL_SECONDS = 5
 
-# ─── 协商配置 ─────────────────────────────────────────────────────────────────
-NEGOTIATION_TOP_K = 3                         # NEGOTIATING 时建议的候选时间块数量
+# ─── Negotiation Configuration ───────────────────────────────────────────────
+NEGOTIATION_TOP_K = 3                         # Number of candidate time blocks suggested during NEGOTIATING
 
-# ─── 日志配置 ─────────────────────────────────────────────────────────────────
-LOG_DIR = "logs"                              # 日志文件目录
-LOG_LEVEL = "DEBUG"                           # 日志级别：DEBUG / INFO / WARNING / ERROR
+# ─── Logging Configuration ───────────────────────────────────────────────────
+LOG_DIR = "logs"                              # Log file directory
+LOG_LEVEL = "DEBUG"                           # Log level: DEBUG / INFO / WARNING / ERROR
 
-# ─── Agent 自身服务配置 ──────────────────────────────────────────────────────
+# ─── Agent Service Configuration ─────────────────────────────────────────────
 AGENT_HOST = "0.0.0.0"
-AGENT_PORT = 8001                             # Agent 自身监听端口（避免与 API Server 冲突）
+AGENT_PORT = 8001                             # Agent listening port (avoid conflict with API Server)

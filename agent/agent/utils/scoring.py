@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 score_meeting API
-对指定会议的所有用户时间数据进行打分，输出到 meeting_score/{meeting_id}.json。
+Scores all user time data for a specified meeting, outputs to meeting_score/{meeting_id}.json.
 
-时间槽 key 格式：YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM
-动态收集所有用户提到的时间槽，不依赖固定列表。
+Time slot key format: YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM
+Dynamically collects all time slots mentioned by users, not dependent on a fixed list.
 
-打分规则：
-  - score   : 该时间段中值为 True（有空）的用户数
-  - conflict: 该时间段中值为 False（明确没空）的用户 ID 列表
-  - 用户未提及该时间段 → 忽略（不计入 score 也不计入 conflict）
+Scoring rules:
+  - score   : Number of users with value True (available) in that time slot
+  - conflict: List of user IDs with value False (explicitly unavailable) in that time slot
+  - User did not mention the time slot -> ignored (not counted in score or conflict)
 
-公开接口：
+Public interface:
     score_meeting(meeting_id: str) -> dict
 """
 
@@ -25,7 +25,7 @@ from .logger import get_logger
 
 logger = get_logger("scoring")
 
-# ─── 配置 ────────────────────────────────────────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────
 
 SCORE_DIR = Path(__file__).resolve().parent.parent / "meeting_score"
 
@@ -34,29 +34,29 @@ def _score_file(meeting_id: str) -> Path:
     SCORE_DIR.mkdir(parents=True, exist_ok=True)
     return SCORE_DIR / f"{meeting_id}.json"
 
-# ─── Pydantic 模型 ────────────────────────────────────────────────────────────
+# ─── Pydantic Models ─────────────────────────────────────────────────────────
 
 class SlotScore(BaseModel):
-    score: int = Field(description="该时间段有空的用户数（True 计数）")
-    conflict: list[str] = Field(description="该时间段明确没空的用户 ID 列表（False 用户）")
+    score: int = Field(description="Number of users available in this time slot (True count)")
+    conflict: list[str] = Field(description="List of user IDs explicitly unavailable in this time slot (False users)")
 
 
 class MeetingScore(RootModel[dict[str, SlotScore]]):
     """
-    会议完整打分结果。
-    key 为日期感知时间段（YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM），value 为 SlotScore。
+    Complete meeting scoring result.
+    Key is a date-aware time slot (YYYY-MM-DD HH:MM--YYYY-MM-DD HH:MM), value is SlotScore.
     """
 
-# ─── 公开 API ─────────────────────────────────────────────────────────────────
+# ─── Public API ───────────────────────────────────────────────────────────────
 
 def score_meeting(meeting_id: str) -> dict:
     """
-    对指定会议的时间段打分并保存结果。
+    Score time slots for the specified meeting and save the results.
 
-    动态收集所有用户提到的时间槽 key，逐槽统计：
-      - True  → score +1
-      - False → 加入 conflict 列表
-      - 不存在（用户未提及）→ 忽略
+    Dynamically collects all time slot keys mentioned by users, tallies per slot:
+      - True  -> score +1
+      - False -> add to conflict list
+      - Not present (user did not mention) -> ignore
 
     Returns:
         {
@@ -68,25 +68,25 @@ def score_meeting(meeting_id: str) -> dict:
     from .agent_input_format import DATA_DIR
     if not (DATA_DIR / f"{meeting_id}.json").exists():
         raise FileNotFoundError(
-            f"找不到会议数据文件：{DATA_DIR / f'{meeting_id}.json'}"
+            f"Meeting data file not found: {DATA_DIR / f'{meeting_id}.json'}"
         )
 
     store = _load_store(meeting_id)
-    logger.info("打分开始: meeting=%s, 参与者=%d", meeting_id, len(store.root))
+    logger.info("Scoring started: meeting=%s, participants=%d", meeting_id, len(store.root))
 
-    # ── 第一步：动态收集所有用户提到的时间槽 key ───────────────────────────────
+    # ── Step 1: Dynamically collect all time slot keys mentioned by users ──
     all_slots: set[str] = set()
     for user_id, entry in store.root.items():
         for key in (entry.model_extra or {}):
-            # 只收集 slot key（含 "--" 的），排除 user_ID / meeting_ID 等元数据
+            # Only collect slot keys (containing "--"), exclude user_ID / meeting_ID and other metadata
             if "--" in key:
                 all_slots.add(key)
 
-    # 按时间排序（字符串排序即可，因为格式统一）
+    # Sort by time (string sorting works since the format is uniform)
     sorted_slots = sorted(all_slots)
 
-    # ── 第二步：逐槽打分 ─────────────────────────────────────────────────────
-    # 对于标准格式用户（只存 True 的槽），未出现的槽视为不可用（conflict）
+    # ── Step 2: Score each slot ────────────────────────────────────────────
+    # For standard format users (only True slots stored), absent slots are treated as unavailable (conflict)
     result: dict[str, SlotScore] = {}
     for slot in sorted_slots:
         score = 0
@@ -100,26 +100,26 @@ def score_meeting(meeting_id: str) -> dict:
             elif val is False:
                 conflict.append(user_id)
             else:
-                # 用户未提及该槽：如果该用户有其他槽数据，说明是标准格式，
-                # 未出现的槽 = 不可用 → 计入 conflict
+                # User did not mention this slot: if the user has other slot data, it's standard format,
+                # absent slot = unavailable -> count as conflict
                 has_any_slot = any("--" in k for k in extras)
                 if has_any_slot:
                     conflict.append(user_id)
-                # 否则该用户完全无数据，忽略
+                # Otherwise the user has no data at all, ignore
 
         result[slot] = SlotScore(score=score, conflict=conflict)
 
     meeting_score = MeetingScore.model_validate(result)
 
-    # 统计摘要
+    # Statistics summary
     total_slots = len(result)
     slots_with_conflict = sum(1 for s in result.values() if s.conflict)
     max_score = max((s.score for s in result.values()), default=0)
-    logger.info("打分完成: meeting=%s, 总槽数=%d, 有冲突槽=%d, 最高score=%d",
+    logger.info("Scoring completed: meeting=%s, total_slots=%d, conflicting_slots=%d, max_score=%d",
                 meeting_id, total_slots, slots_with_conflict, max_score)
     for slot_key, slot_score in result.items():
         if slot_score.conflict:
-            logger.debug("  冲突槽: %s → score=%d, conflict=%s", slot_key, slot_score.score, slot_score.conflict)
+            logger.debug("  Conflicting slot: %s -> score=%d, conflict=%s", slot_key, slot_score.score, slot_score.conflict)
 
     path = _score_file(meeting_id)
     path.write_text(

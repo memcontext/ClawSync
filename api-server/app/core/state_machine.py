@@ -10,20 +10,20 @@ class MeetingState(str, Enum):
     ANALYZING = "ANALYZING"
     CONFIRMED = "CONFIRMED"
     FAILED = "FAILED"
-    OVER = "OVER"           # 会议结束，通知被邀请人最终结果
+    OVER = "OVER"           # Meeting ended, notify invitees of final result
 
 
 class StateMachine:
     """
-    会议状态机
+    Meeting state machine
 
-    状态流转：
-      PENDING → COLLECTING → ANALYZING → CONFIRMED → OVER
-                     ↑            ↓
-                     └── COLLECTING（多轮协商循环）
-                                  ↓
-                               FAILED → OVER（发起人取消）
-                               FAILED → COLLECTING（发起人重新发起）
+    State transitions:
+      PENDING -> COLLECTING -> ANALYZING -> CONFIRMED -> OVER
+                     ^            |
+                     +-- COLLECTING (multi-round negotiation loop)
+                                  |
+                               FAILED -> OVER (initiator cancels)
+                               FAILED -> COLLECTING (initiator re-initiates)
     """
 
     def __init__(self, max_rounds: int = 3):
@@ -38,38 +38,38 @@ class StateMachine:
         }
 
     def can_transition(self, current: MeetingState, target: MeetingState) -> bool:
-        """检查状态转换是否合法"""
+        """Check if the state transition is valid"""
         return target in self.transitions.get(current, [])
 
     def transition(self, current: MeetingState, target: MeetingState,
                    context: Optional[Dict[str, Any]] = None) -> MeetingState:
-        """执行状态转换"""
+        """Execute state transition"""
         if not self.can_transition(current, target):
-            raise ValueError(f"无法从 {current} 转换到 {target}")
+            raise ValueError(f"Cannot transition from {current} to {target}")
 
         self._before_transition(current, target, context)
         return target
 
     def _before_transition(self, current: MeetingState, target: MeetingState, context: Optional[Dict[str, Any]] = None):
-        """转换前的业务逻辑"""
+        """Pre-transition business logic"""
         if target == MeetingState.COLLECTING:
             if current == MeetingState.ANALYZING:
-                # 多轮协商：ANALYZING → COLLECTING（重新收集）
+                # Multi-round negotiation: ANALYZING -> COLLECTING (re-collect)
                 round_count = context.get('round_count', 0) if context else 0
                 if round_count >= self.max_rounds:
-                    raise ValueError("已达到最大协商轮数，无法继续协商")
-                print(f"会议进入第 {round_count + 1} 轮收集")
+                    raise ValueError("Maximum negotiation rounds reached, cannot continue negotiation")
+                print(f"Meeting entering collection round {round_count + 1}")
             else:
-                print(f"会议进入收集阶段: {context.get('meeting_id') if context else 'unknown'}")
+                print(f"Meeting entering collection phase: {context.get('meeting_id') if context else 'unknown'}")
 
         elif target == MeetingState.ANALYZING:
-            print(f"会议进入分析阶段: {context.get('meeting_id') if context else 'unknown'}")
+            print(f"Meeting entering analysis phase: {context.get('meeting_id') if context else 'unknown'}")
 
         elif target == MeetingState.CONFIRMED:
-            print(f"会议协商成功: {context.get('final_time') if context else 'unknown'}")
+            print(f"Meeting negotiation successful: {context.get('final_time') if context else 'unknown'}")
 
         elif target == MeetingState.FAILED:
-            print(f"会议协商失败: {context.get('reason') if context else 'unknown'}")
+            print(f"Meeting negotiation failed: {context.get('reason') if context else 'unknown'}")
 
         elif target == MeetingState.OVER:
-            print(f"会议已结束: {context.get('meeting_id') if context else 'unknown'}")
+            print(f"Meeting ended: {context.get('meeting_id') if context else 'unknown'}")

@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.post("/send-code", response_model=APIResponse)
 def send_code(req: SendCodeRequest):
-    """发送验证码到邮箱（同步，FastAPI 自动放入线程池）"""
+    """Send verification code to email (synchronous, FastAPI auto-dispatches to thread pool)"""
     ok, reason = can_send(req.email)
     if not ok:
         return APIResponse(code=429, message=reason)
@@ -22,14 +22,14 @@ def send_code(req: SendCodeRequest):
     code = generate_code(req.email)
     success = send_verification_email(req.email, code)
     if not success:
-        return APIResponse(code=500, message="邮件发送失败，请稍后重试")
+        return APIResponse(code=500, message="Failed to send email, please try again later")
 
-    return APIResponse(code=200, message="验证码已发送，请查收邮箱")
+    return APIResponse(code=200, message="Verification code sent, please check your email")
 
 
 @router.post("/verify-bind", response_model=APIResponse)
 async def verify_bind(req: VerifyBindRequest, db: Session = Depends(get_db)):
-    """验证码校验通过后绑定邮箱"""
+    """Bind email after verification code is validated"""
     ok, reason = verify_code(req.email, req.code)
     if not ok:
         return APIResponse(code=400, message=reason)
@@ -42,7 +42,7 @@ async def verify_bind(req: VerifyBindRequest, db: Session = Depends(get_db)):
             db.commit()
             return APIResponse(
                 code=200,
-                message="验证成功",
+                message="Verification successful",
                 data={"token": user.token, "user_id": user.id}
             )
 
@@ -59,7 +59,7 @@ async def verify_bind(req: VerifyBindRequest, db: Session = Depends(get_db)):
 
         return APIResponse(
             code=200,
-            message="验证并注册成功",
+            message="Verification and registration successful",
             data={"token": new_user.token, "user_id": new_user.id}
         )
 
@@ -70,14 +70,14 @@ async def verify_bind(req: VerifyBindRequest, db: Session = Depends(get_db)):
 
 @router.post("/bind", response_model=APIResponse, deprecated=True)
 async def bind_email(user_data: UserCreate, db: Session = Depends(get_db)):
-    """[Deprecated] 直接绑定邮箱（无验证，保留向后兼容）"""
+    """[Deprecated] Direct email binding (no verification, kept for backward compatibility)"""
     try:
         user = db.query(User).filter(User.email == user_data.email).first()
 
         if user:
             return APIResponse(
                 code=200,
-                message="用户已存在",
+                message="User already exists",
                 data={
                     "token": user.token,
                     "user_id": user.id
@@ -97,7 +97,7 @@ async def bind_email(user_data: UserCreate, db: Session = Depends(get_db)):
 
         return APIResponse(
             code=200,
-            message="注册成功",
+            message="Registration successful",
             data={
                 "token": new_user.token,
                 "user_id": new_user.id

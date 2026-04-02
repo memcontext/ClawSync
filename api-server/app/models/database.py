@@ -15,7 +15,7 @@ class User(Base):
     email_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # 关系
+    # Relationships
     meetings_initiated = relationship("Meeting", back_populates="initiator")
     negotiation_logs = relationship("NegotiationLog", back_populates="user")
 
@@ -28,14 +28,14 @@ class Meeting(Base):
     title = Column(String(255), nullable=False)
     duration_minutes = Column(Integer, nullable=False)
     status = Column(String(50), nullable=False, default='PENDING')
-    final_time = Column(String(100), nullable=True)  # 字符串格式: "2026-03-18 15:00-15:30"
+    final_time = Column(String(100), nullable=True)  # String format: "2026-03-18 15:00-15:30"
     round_count = Column(Integer, default=0)
-    coordinator_reasoning = Column(Text, nullable=True)  # Coordinator 的分析理由
-    meeting_link = Column(String(500), nullable=True)  # 会议链接（Zoom/Google Meet）
+    coordinator_reasoning = Column(Text, nullable=True)  # Coordinator's analysis reasoning
+    meeting_link = Column(String(500), nullable=True)  # Meeting link (Zoom/Google Meet)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # 关系
+    # Relationships
     initiator = relationship("User", back_populates="meetings_initiated")
     negotiation_logs = relationship("NegotiationLog", back_populates="meeting", cascade="all, delete-orphan")
 
@@ -50,19 +50,19 @@ class NegotiationLog(Base):
     latest_slots = Column(JSON, nullable=False, default=[])
     preference_note = Column(Text, nullable=True)
     action_required = Column(Boolean, default=True)
-    counter_proposal_message = Column(Text, nullable=True)  # Coordinator 下发的妥协建议
-    suggested_slots = Column(JSON, nullable=True)  # Agent 建议的调整时间槽
+    counter_proposal_message = Column(Text, nullable=True)  # Coordinator's compromise suggestion
+    suggested_slots = Column(JSON, nullable=True)  # Agent's suggested adjusted time slots
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # 关系
+    # Relationships
     meeting = relationship("Meeting", back_populates="negotiation_logs")
     user = relationship("User", back_populates="negotiation_logs")
 
 
-# 数据库连接
-# connect_args: timeout=30 让写操作等待最多30秒（默认5秒太短）
-# check_same_thread=False 允许多线程访问（FastAPI 异步需要）
+# Database connection
+# connect_args: timeout=30 allows write operations to wait up to 30 seconds (default 5 seconds is too short)
+# check_same_thread=False allows multi-thread access (required for FastAPI async)
 engine = create_engine(
     'sqlite:///./meeting_coordinator.db',
     echo=False,

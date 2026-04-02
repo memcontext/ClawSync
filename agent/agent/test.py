@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-测试 coordinate_from_task：模拟 API 7 输入，验证 API 8 输出。
-包含 4 个场景：2 个无冲突（CONFIRMED）+ 2 个有冲突（NEGOTIATING）。
+Test coordinate_from_task: simulate API 7 input, verify API 8 output.
+Contains 4 scenarios: 2 no-conflict (CONFIRMED) + 2 with-conflict (NEGOTIATING).
 """
 import json
 from utils import coordinate_from_task
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 场景 1：无冲突 / 30 分钟会议
+# Scenario 1: No conflict / 30-minute meeting
 #   Alice (initiator)  : 18:00-20:00
 #   Bob  (participant)  : 18:00-19:00
-#   Carol (participant) : 自然语言 "今晚全程有空"
-#   → 三人在 18:00-19:00 均有空，30 分钟即可，预期 CONFIRMED
+#   Carol (participant) : Natural language "Free all evening"
+#   -> All three available 18:00-19:00, 30 min sufficient, expected CONFIRMED
 # ═══════════════════════════════════════════════════════════════════════════════
 task_1 = {
     "meeting_id": "test_no_conflict_30min",
-    "title": "场景1：无冲突 30 分钟",
+    "title": "Scenario 1: No conflict 30 min",
     "duration_minutes": 30,
     "round_count": 0,
     "participants_data": [
@@ -42,21 +42,21 @@ task_1 = {
             "email": "carol@example.com",
             "role": "participant",
             "latest_slots": [],
-            "preference_note": "今晚全程有空",
+            "preference_note": "Free all evening",
         },
     ],
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 场景 2：无冲突 / 60 分钟会议（需要连续 2 个槽）
+# Scenario 2: No conflict / 60-minute meeting (needs 2 consecutive slots)
 #   Alice (initiator)  : 14:00-17:00
 #   Bob  (participant)  : 15:00-17:00
 #   Carol (participant) : 14:30-18:00
-#   → 三人在 15:00-17:00 均有空，60 分钟连续块存在，预期 CONFIRMED
+#   -> All three available 15:00-17:00, 60-min consecutive block exists, expected CONFIRMED
 # ═══════════════════════════════════════════════════════════════════════════════
 task_2 = {
     "meeting_id": "test_no_conflict_60min",
-    "title": "场景2：无冲突 60 分钟",
+    "title": "Scenario 2: No conflict 60 min",
     "duration_minutes": 60,
     "round_count": 0,
     "participants_data": [
@@ -91,15 +91,15 @@ task_2 = {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 场景 3：有冲突 / 时间完全不重叠
-#   Alice (initiator)  : 09:00-11:00（上午）
-#   Bob  (participant)  : 18:00-20:00（晚上）
-#   Carol (participant) : 14:00-16:00（下午）
-#   → 三人时间段毫无交集，预期 NEGOTIATING
+# Scenario 3: Conflict / no time overlap at all
+#   Alice (initiator)  : 09:00-11:00 (morning)
+#   Bob  (participant)  : 18:00-20:00 (evening)
+#   Carol (participant) : 14:00-16:00 (afternoon)
+#   -> No intersection among the three, expected NEGOTIATING
 # ═══════════════════════════════════════════════════════════════════════════════
 task_3 = {
     "meeting_id": "test_conflict_no_overlap",
-    "title": "场景3：完全无交集",
+    "title": "Scenario 3: No overlap at all",
     "duration_minutes": 30,
     "round_count": 0,
     "participants_data": [
@@ -134,16 +134,16 @@ task_3 = {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 场景 4：有冲突 / 交集时间不够长（duration 太大）
+# Scenario 4: Conflict / intersection time not long enough (duration too large)
 #   Alice (initiator)  : 18:00-19:00
 #   Bob  (participant)  : 18:00-19:00
 #   Carol (participant) : 18:00-19:00
-#   → 三人都在 18:00-19:00 有空（60 分钟），但会议需要 90 分钟
-#   → 只有 2 个连续槽（60 分钟），不满足 3 个槽（90 分钟），预期 NEGOTIATING
+#   -> All three available 18:00-19:00 (60 min), but meeting needs 90 min
+#   -> Only 2 consecutive slots (60 min), insufficient for 3 slots (90 min), expected NEGOTIATING
 # ═══════════════════════════════════════════════════════════════════════════════
 task_4 = {
     "meeting_id": "test_conflict_duration_too_long",
-    "title": "场景4：交集不够长",
+    "title": "Scenario 4: Insufficient overlap",
     "duration_minutes": 90,
     "round_count": 0,
     "participants_data": [
@@ -179,26 +179,26 @@ task_4 = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 运行所有场景
+# Run all scenarios
 # ═══════════════════════════════════════════════════════════════════════════════
 
 tasks = [task_1, task_2, task_3, task_4]
 
 for i, task in enumerate(tasks, 1):
     print(f"\n{'='*60}")
-    print(f"  场景 {i}：{task['title']}")
+    print(f"  Scenario {i}: {task['title']}")
     print(f"  meeting_id: {task['meeting_id']}")
     print(f"  duration_minutes: {task['duration_minutes']}")
     print(f"{'='*60}\n")
 
     result = coordinate_from_task(task)
 
-    print(f"\n  结果：")
+    print(f"\n  Result:")
     print(json.dumps(result, ensure_ascii=False, indent=4))
 
-    # 简单断言
+    # Simple assertion
     expected = "CONFIRMED" if i <= 2 else "NEGOTIATING"
     status = result.get("decision_status", "UNKNOWN")
     ok = "PASS" if status == expected else "FAIL"
-    print(f"\n  [{ok}] 预期 {expected}，实际 {status}")
+    print(f"\n  [{ok}] Expected {expected}, actual {status}")
     print()
