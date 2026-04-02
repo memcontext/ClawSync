@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // ClawMeeting Plugin - 入口文件
 // 架构设计：
 //   1. 插件加载时：恢复 Token → 有 Token 则立即启动轮询 + 队列处理器
@@ -820,7 +820,7 @@ export default function register(api: any) {
           "3. Wait for the user's explicit decision before taking any action.",
           "4. When submitting, ALWAYS include preference_note with user's reasoning.",
           "5. CRITICAL: When the user replies with a decision (accept/reject/cancel/new times), you MUST call check_and_respond_tasks to execute it.",
-          "   '取消'/'拒绝'/'不参加'/'cancel' → response_type=REJECT. '接受'/'同意'/'accept' → response_type=ACCEPT_PROPOSAL.",
+          "   'cancel'/'reject'/'not attending' -> response_type=REJECT. 'accept'/'agree'/'works for me' -> response_type=ACCEPT_PROPOSAL.",
           "   Do NOT just acknowledge verbally — always call the tool.",
           langRule,
         ].join(" "),
@@ -840,7 +840,7 @@ export default function register(api: any) {
           "   first call check_and_respond_tasks with response_type=REJECT to close this failed negotiation,",
           "   then call initiate_meeting to create the revised meeting.",
           "5. CRITICAL: When the user replies with a decision, you MUST call tools to execute it.",
-          "   '取消'/'算了'/'不开了'/'cancel' → response_type=REJECT. Never just acknowledge verbally — always call the tool.",
+          "   'cancel'/'stop'/'drop it'/'not proceeding' -> response_type=REJECT. Never just acknowledge verbally - always call the tool.",
           langRule,
         ].join(" "),
       ].filter(Boolean).join("\n");
@@ -879,21 +879,21 @@ export default function register(api: any) {
         "",
         "After processing, reply using this EXACT structured format (MANDATORY — never skip or simplify):",
         "",
-        "### 📅 会议基本信息",
-        "- **会议主题**: [Meeting Title]",
-        "- **组织者**: [Organizer Email]",
-        "- **时长**: [Duration]",
+        "### Meeting Basics",
+        "- **Meeting Title**: [Meeting Title]",
+        "- **Organizer**: [Organizer Email]",
+        "- **Duration**: [Duration]",
         "",
-        "### 🔍 日程核查结果",
-        "- **数据来源**: [日历查询 / 记忆推断 / 无可用数据]",
-        "- **可用时段**: [List free slots, or '未知（需用户确认）']",
-        "- **冲突提醒**: [Specific conflicts, or '无已知冲突']",
+        "### Schedule Check Results",
+        "- **Data Source**: [Calendar Query / Memory Inference / No Available Data]",
+        "- **Available Slots**: [List free slots, or 'Unknown (user confirmation required)']",
+        "- **Conflict Notes**: [Specific conflicts, or 'No known conflicts']",
         "",
-        "### 💡 处理结果",
-        "- **执行动作**: [e.g., '已自动提交: 13:00-18:00 全时段可用' / '待你确认后提交']",
-        "- **待确认**: [If needed: 'Which slots work for you?']",
+        "### Action Outcome",
+        "- **Executed Action**: [e.g., 'Auto-submitted: 13:00-18:00 fully available' / 'Waiting for your confirmation before submit']",
+        "- **Pending Confirmation**: [If needed: 'Which slots work for you?']",
         "",
-        "NEVER reply with a single paragraph or just '已提交/已拒绝'. Always provide the full structured report above.",
+        "NEVER reply with a single paragraph or just 'submitted/rejected'. Always provide the full structured report above.",
         langRule,
       ].join("\n"));
       return lines.join("\n");
@@ -906,45 +906,45 @@ export default function register(api: any) {
 
   /** 给用户直接看的通知（不含 agent 指令，用于 message tool 直推到 Telegram 等渠道） */
   function buildDirectNotification(t: any): string {
-    const title = t.title ?? "未知会议";
+    const title = t.title ?? "Unknown Meeting";
     const msg = t.message ?? "";
     const taskType = t.task_type;
 
     if (taskType === "MEETING_CONFIRMED") {
-      const parts = [`✅ 会议确认：「${title}」`];
-      if (t.final_time) parts.push(`⏰ 时间: ${t.final_time}`);
-      if (t.duration_minutes) parts.push(`⏱️ 时长: ${t.duration_minutes} 分钟`);
-      if (t.meeting_link) parts.push(`🔗 链接: ${t.meeting_link}`);
-      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
-      if (t._participants) parts.push(`👥 参与者: ${t._participants}`);
+      const parts = [`✅ Meeting Confirmed: "${title}"`];
+      if (t.final_time) parts.push(`⏰ Time: ${t.final_time}`);
+      if (t.duration_minutes) parts.push(`⏱️ Duration: ${t.duration_minutes} minutes`);
+      if (t.meeting_link) parts.push(`🔗 Link: ${t.meeting_link}`);
+      if (t.initiator) parts.push(`👤 Organizer: ${t.initiator}`);
+      if (t._participants) parts.push(`👥 Participants: ${t._participants}`);
       if (msg) parts.push("", msg);
       return parts.join("\n");
     }
     if (taskType === "MEETING_OVER") {
-      const parts = [`❌ 会议取消：「${title}」`];
-      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
+      const parts = [`❌ Meeting Cancelled: "${title}"`];
+      if (t.initiator) parts.push(`👤 Organizer: ${t.initiator}`);
       if (msg) parts.push("", msg);
       return parts.join("\n");
     }
     if (taskType === "COUNTER_PROPOSAL") {
-      const parts = [`🔄 会议协商：「${title}」需要你决策`];
-      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
-      if (t.duration_minutes) parts.push(`⏱️ 时长: ${t.duration_minutes} 分钟`);
+      const parts = [`🔄 Counter-Proposal: "${title}" — Your decision is needed`];
+      if (t.initiator) parts.push(`👤 Organizer: ${t.initiator}`);
+      if (t.duration_minutes) parts.push(`⏱️ Duration: ${t.duration_minutes} minutes`);
       if (msg) parts.push("", msg);
-      parts.push("", "请在对话中回复你的决策（接受/提出新时段/拒绝）");
+      parts.push("", "Please reply in the conversation with your decision (Accept / Propose new times / Reject).");
       return parts.join("\n");
     }
     if (taskType === "MEETING_FAILED") {
-      const parts = [`❌ 会议协商失败：「${title}」`];
-      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
+      const parts = [`❌ Meeting Negotiation Failed: "${title}"`];
+      if (t.initiator) parts.push(`👤 Organizer: ${t.initiator}`);
       if (msg) parts.push("", msg);
-      parts.push("", "请在对话中回复你的决策（取消/调整参数重试）");
+      parts.push("", "Please reply in the conversation with your decision (Cancel / Adjust and retry / Change meeting setup).");
       return parts.join("\n");
     }
     if (taskType === "INITIAL_SUBMIT") {
-      const parts = [`📅 收到会议邀请：「${title}」`];
-      if (t.initiator) parts.push(`👤 发起人: ${t.initiator}`);
-      if (t.duration_minutes) parts.push(`⏱️ 时长: ${t.duration_minutes} 分钟`);
+      const parts = [`📅 Meeting Invitation: "${title}"`];
+      if (t.initiator) parts.push(`👤 Organizer: ${t.initiator}`);
+      if (t.duration_minutes) parts.push(`⏱️ Duration: ${t.duration_minutes} minutes`);
       if (msg) parts.push("", msg);
       return parts.join("\n");
     }
@@ -1468,7 +1468,7 @@ export default function register(api: any) {
             "If your memory contains the user's meeting preferences (e.g. dislikes early meetings), fill in preference_note. Otherwise leave it empty.",
             "Once you have all required info, call `initiate_meeting` immediately — do NOT call any external API.",
             "If `initiate_meeting` result indicates any invitee is not registered, explicitly remind the user:",
-            "  您邀请的xxx用户尚未在clawmeeting注册~后续版本我们将直接支持邮件沟通，敬请期待！",
+            "  The invitee xxx is not registered on ClawMeeting yet. Direct email collaboration will be supported in a future release. Stay tuned.",
             "",
             "Background behavior:",
             "- On [ClawMeeting Meeting Invitation]: follow this exact order to determine available time slots. Prioritize autonomous submission first:",
@@ -1477,32 +1477,32 @@ export default function register(api: any) {
             "  Step 3: Combine calendar + memory with the organizer's proposed slots. If you can decide reliably, call `check_and_respond_tasks` immediately.",
             "          (response_type=INITIAL with available_slots, or REJECT if clearly impossible).",
             "  Ask the user ONLY when information is insufficient, conflict judgement is ambiguous, or confidence is low.",
-            "  Always provide a structured transparency report after processing; never reply with one-line '已提交/已拒绝'.",
+            "  Always provide a structured transparency report after processing; never reply with a one-line 'submitted/rejected' message.",
             "- On [ClawMeeting COUNTER_PROPOSAL]:",
-            "  这是协商建议通知。完整展示协调方的建议内容，并询问用户：",
-            "  1. 接受 → call `check_and_respond_tasks` with response_type='ACCEPT_PROPOSAL'",
-            "  2. 提出新时段 → 用户提供时段，call response_type='NEW_PROPOSAL' + available_slots",
-            "  3. 拒绝 → call response_type='REJECT'",
+            "  This is a counter-proposal notice. Present all coordinator suggestions in full and ask the user:",
+            "  1. Accept -> call `check_and_respond_tasks` with response_type='ACCEPT_PROPOSAL'",
+            "  2. Propose new slots -> user provides slots, call response_type='NEW_PROPOSAL' + available_slots",
+            "  3. Reject -> call response_type='REJECT'",
             "- On [ClawMeeting MEETING_FAILED]:",
-            "  这是协商失败通知。完整展示失败原因，并询问用户三类决策：",
-            "  1. 取消会议 → call `check_and_respond_tasks` with response_type='REJECT'",
-            "  2. 调整时间重试 → 用户提供新时段，call response_type='NEW_PROPOSAL' + available_slots",
-            "  3. 修改会议设置（非仅时间）→ 如修改时长、拆分会议、增减人员、改线上/线下/邮件沟通。",
-            "     此类变更先 call `check_and_respond_tasks` with response_type='REJECT' 关闭当前失败协商，再用 `initiate_meeting` 创建新会议。",
+            "  This is a negotiation-failed notice. Present the failure reason in full and ask the user to choose one of three decisions:",
+            "  1. Cancel meeting -> call `check_and_respond_tasks` with response_type='REJECT'",
+            "  2. Retry with adjusted slots -> user provides new slots, call response_type='NEW_PROPOSAL' + available_slots",
+            "  3. Change meeting setup (not only time), e.g., adjust duration, split the meeting, add/remove participants, or switch to online/offline/email.",
+            "     For this type of change, first call `check_and_respond_tasks` with response_type='REJECT' to close the current failed negotiation, then use `initiate_meeting` to create a new meeting.",
             "- On [ClawMeeting MEETING_CONFIRMED]:",
-            "  这是会议确认通知。请将通知中的所有信息完整展示给用户：",
-            "  会议名称、确认时间、时长、会议链接（如有）。不要省略任何细节，不要简化。",
+            "  This is a meeting-confirmed notice. Present all information in full to the user:",
+            "  Meeting title, confirmed time, duration, meeting link (if any). Do not omit details or simplify.",
             "- On [ClawMeeting MEETING_OVER]:",
-            "  这是会议取消通知。告知用户会议已被取消，展示会议名称和原因。",
+            "  This is a meeting-cancelled notice. Inform the user the meeting was cancelled and show the title and reason.",
             "",
             "[ClawMeeting CRITICAL RULE — Tool Execution Required]",
             "When the user makes ANY decision about a meeting (accept, reject, cancel, retry, new times, or meeting-setup changes),",
             "you MUST call tools to execute it. NEVER just acknowledge verbally.",
             "For setup-change decisions (duration/split/participants/format), execute with: check_and_respond_tasks(REJECT) + initiate_meeting(new setup).",
-            "Keyword mapping: '取消'/'算了'/'拒绝'/'不参加'/'cancel' → REJECT.",
-            "'接受'/'同意'/'可以'/'accept' → ACCEPT_PROPOSAL.",
-            "'换个时间'/'重试'/'retry' → ask user for new slots, then NEW_PROPOSAL.",
-            "'改成30分钟'/'分两次开'/'也叫上某某'/'改成邮件沟通吧' → setup-change flow (REJECT current + initiate new).",
+            "Keyword mapping: 'cancel'/'drop'/'reject'/'not attending' -> REJECT.",
+            "'accept'/'agree'/'works' -> ACCEPT_PROPOSAL.",
+            "'change time'/'retry' -> ask user for new slots, then NEW_PROPOSAL.",
+            "'make it 30 minutes'/'split into two meetings'/'add another participant'/'switch to email' -> setup-change flow (REJECT current + initiate new).",
             "If in doubt, call the tool. A verbal-only response is ALWAYS wrong for meeting decisions.",
           ].join("\n")
         : [
@@ -1567,8 +1567,8 @@ export default function register(api: any) {
 
     const readmePath = join(__dirname_esm, "README.md");
     const welcomePrompt = [
-      "【系统通知】ClawMeeting 插件已安装并配置完成（gateway 已自动重启以加载新配置）。",
-      `请阅读插件说明文件 ${readmePath} ，然后用友好简洁的方式向用户介绍插件的核心功能和使用方法。`,
+      "[System Notice] ClawMeeting plugin is installed and configured (gateway has restarted to load the new configuration).",
+      `Please read the plugin guide at ${readmePath}, then give the user a friendly and concise introduction to its core capabilities and usage.`,
     ].join("\n");
 
     setTimeout(async () => {
@@ -1581,3 +1581,4 @@ export default function register(api: any) {
     }, 8000); // 等 gateway 完全启动 + sessions 就绪
   }
 }
+
