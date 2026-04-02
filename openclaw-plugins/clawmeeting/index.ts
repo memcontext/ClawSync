@@ -9,7 +9,7 @@
 //   6. 去重三层：notifiedMeetings(磁盘) / submittedMeetings(内存) / pendingDecisions(磁盘)
 // ============================================================
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
@@ -406,13 +406,17 @@ export default function register(api: any) {
     }
   }
 
-  // 渠道自动发现：遍历 api.config.channels，从 pairing allow store 读取
+  // 渠道自动发现：三级 fallback
+  //   Level 1: pairing allowFrom store（Telegram 等 dmPolicy:"pairing" 渠道）
+  //   Level 2: commands.log（gateway 操作日志，含所有渠道的 sessionKey）
+  //   Level 3: session transcript 文件扫描（最通用兜底）
   const configuredChannels = api.config?.channels ?? {};
   for (const [channelName, channelCfg] of Object.entries(configuredChannels)) {
     if (!(channelCfg as any)?.enabled) continue;
     if (WEBCHAT_CHANNELS.has(channelName)) continue;
     if (extraChannels.has(channelName)) continue; // 已从磁盘恢复
 
+    // ---- Level 1: allowFrom store (Telegram-style pairing) ----
     try {
       const allowStorePath = join(homedir(), ".openclaw", "credentials", `${channelName}-default-allowFrom.json`);
       if (existsSync(allowStorePath)) {
@@ -425,18 +429,87 @@ export default function register(api: any) {
           };
           extraChannels.set(channelName, ctx);
           saveChannelCtx(channelName, ctx);
-          console.log(`[CM:init] ${channelName} 自动发现: target=${allowFrom[0]}, sessionKey=${ctx.sessionKey}`);
+          console.log(`[CM:init] ${channelName} discovered via allowFrom: target=${allowFrom[0]}`);
         }
       }
     } catch (err) {
-      console.log(`[CM:init] 读取 ${channelName} allow store 失败: ${err}`);
+      console.log(`[CM:init] ${channelName} allowFrom read failed: ${err}`);
+    }
+
+    // ---- Level 2: commands.log (gateway operation log) ----
+    // Feishu uses dmPolicy:"open" → no allowFrom.json; but gateway's commands.log
+    // records session operations (reset/send/etc.) with full sessionKey
+    if (!extraChannels.has(channelName)) {
+      try {
+        const cmdLogPath = join(homedir(), ".openclaw", "logs", "commands.log");
+        if (existsSync(cmdLogPath)) {
+          const logContent = readFileSync(cmdLogPath, "utf-8");
+          const keyRe = new RegExp(
+            `"sessionKey":"(agent:main:${channelName}:(?:direct|dm|group|channel):[^"]+)"`, "g",
+          );
+          let latestKey: string | null = null;
+          let m: RegExpExecArray | null;
+          while ((m = keyRe.exec(logContent)) !== null) latestKey = m[1];
+          if (latestKey) {
+            const ctx: SessionContext = { sessionKey: latestKey, channel: channelName };
+            extraChannels.set(channelName, ctx);
+            saveChannelCtx(channelName, ctx);
+            console.log(`[CM:init] ${channelName} discovered via commands.log: ${latestKey}`);
+          }
+        }
+      } catch (err) {
+        console.log(`[CM:init] ${channelName} commands.log scan failed: ${(err as Error)?.message}`);
+      }
+    }
+
+    // ---- Level 3: session transcript scan (universal fallback) ----
+    // Scan the most recent .jsonl session files for a matching sessionKey pattern.
+    // Reads only the first 8KB of each file (sessionKey appears early in transcript metadata).
+    if (!extraChannels.has(channelName)) {
+      try {
+        const sessionsDir = join(homedir(), ".openclaw", "agents", "main", "sessions");
+        if (existsSync(sessionsDir)) {
+          const files = readdirSync(sessionsDir)
+            .filter(f => f.endsWith(".jsonl") && !f.includes(".reset.") && !f.includes(".deleted.") && !f.includes(".bak."))
+            .map(f => { try { return { name: f, mtime: statSync(join(sessionsDir, f)).mtimeMs }; } catch { return null; } })
+            .filter((f): f is { name: string; mtime: number } => f !== null)
+            .sort((a, b) => b.mtime - a.mtime)
+            .slice(0, 10);
+
+          const keyPattern = new RegExp(`agent:main:${channelName}:(?:direct|dm|group|channel):[^"\\\\\\s]+`);
+          for (const file of files) {
+            try {
+              const filePath = join(sessionsDir, file.name);
+              const fd = openSync(filePath, "r");
+              const buf = Buffer.alloc(8192);
+              const bytesRead = readSync(fd, buf, 0, 8192, 0);
+              closeSync(fd);
+              const head = buf.toString("utf-8", 0, bytesRead);
+              const match = head.match(keyPattern);
+              if (match) {
+                const ctx: SessionContext = { sessionKey: match[0], channel: channelName };
+                extraChannels.set(channelName, ctx);
+                saveChannelCtx(channelName, ctx);
+                console.log(`[CM:init] ${channelName} discovered via session transcript: ${match[0]}`);
+                break;
+              }
+            } catch { /* skip unreadable file */ }
+          }
+        }
+      } catch (err) {
+        console.log(`[CM:init] ${channelName} session scan failed: ${(err as Error)?.message}`);
+      }
+    }
+
+    if (!extraChannels.has(channelName)) {
+      console.log(`[CM:init] ${channelName} enabled but no session found (user has not messaged yet)`);
     }
   }
 
   if (extraChannels.size === 0) {
-    console.log(`[CM:init] 无额外渠道（Telegram/飞书等未配置或未配对）`);
+    console.log(`[CM:init] no extra channels discovered (Telegram/Feishu/etc. not configured or not yet paired)`);
   } else {
-    console.log(`[CM:init] 已发现 ${extraChannels.size} 个额外渠道: [${[...extraChannels.keys()].join(", ")}]`);
+    console.log(`[CM:init] discovered ${extraChannels.size} extra channel(s): [${[...extraChannels.keys()].join(", ")}]`);
   }
 
   // ============================================================
@@ -1362,19 +1435,19 @@ export default function register(api: any) {
     ({ program }: any) => {
       program
         .command("clawmeeting-status")
-        .description("查看 ClawMeeting 插件状态")
+        .description("Show ClawMeeting plugin status")
         .action(() => {
           const creds = loadCredentials();
           const session = loadSession();
           console.log("=== ClawMeeting Meeting Negotiator ===");
-          console.log(`服务端地址: ${pluginConfig.serverUrl}`);
-          console.log(`轮询间隔: ${pluginConfig.pollingIntervalMs}ms`);
-          console.log(`自动响应: ${pluginConfig.autoRespond ? "开启" : "关闭"}`);
-          console.log(`轮询状态: ${pollingManager.isRunning() ? "运行中" : "已停止"}`);
-          console.log(`已通知会议数: ${notifiedMeetings.size}`);
-          console.log(`主动推送: ${gatewayToken ? "可用 (分流: message + sessions_send)" : "不可用"}`);
+          console.log(`Server URL: ${pluginConfig.serverUrl}`);
+          console.log(`Polling interval: ${pluginConfig.pollingIntervalMs}ms`);
+          console.log(`Auto-respond: ${pluginConfig.autoRespond ? "enabled" : "disabled"}`);
+          console.log(`Polling: ${pollingManager.isRunning() ? "running" : "stopped"}`);
+          console.log(`Notified meetings: ${notifiedMeetings.size}`);
+          console.log(`Push: ${gatewayToken ? "available (message + sessions_send)" : "unavailable"}`);
           if (creds?.email) {
-            console.log(`已绑定邮箱: ${creds.email}`);
+            console.log(`Bound email: ${creds.email}`);
           }
           if (session?.sessionKey) {
             console.log(`Session: ${session.sessionKey}`);
