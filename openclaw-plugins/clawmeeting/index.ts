@@ -1118,7 +1118,7 @@ export default function register(api: any) {
           await apiClient.submitAvailability(meetingId, {
             response_type: "REJECT",
             available_slots: [],
-            preference_note: "Agent offline - 用户 Agent 在 10 分钟内未能响应此任务",
+            preference_note: "Agent offline — the user's agent did not respond to this task within 10 minutes.",
           });
           console.log(`[CM:queue] AGENT_OFFLINE 上报成功: ${meetingId?.slice(-8)}`);
         } catch (err) {
@@ -1127,7 +1127,7 @@ export default function register(api: any) {
 
         // INITIAL_SUBMIT 不通知用户（静默处理），其他类型通知
         if (taskType !== "INITIAL_SUBMIT") {
-          const offlineMsg = `⚠️ 会议「${title}」因 Agent 离线超时（10 分钟），已自动拒绝。如需参加请重新协商。`;
+          const offlineMsg = `⚠️ Meeting "${title}" was automatically rejected due to agent offline timeout (10 minutes). Please re-negotiate if you wish to participate.`;
           await pushToExtraChannels(offlineMsg);
           pendingNotifications.push(offlineMsg);
         }
@@ -1421,14 +1421,15 @@ export default function register(api: any) {
         }
 
         // 额外渠道 session 捕获（通用：Telegram/飞书/Discord 等）
-        if (channel && !WEBCHAT_CHANNELS.has(channel)) {
-          const existing = extraChannels.get(channel);
+        // 使用 effectiveChannel（从 sessionKey 解析），兼容飞书等不传 channelId 的渠道
+        if (!isWebchat) {
+          const existing = extraChannels.get(effectiveChannel);
           if (!existing || existing.sessionKey !== sessionKey) {
             const oldKey = existing?.sessionKey ?? "null";
-            const ctx: SessionContext = { sessionKey, channel };
-            extraChannels.set(channel, ctx);
-            saveChannelCtx(channel, ctx);
-            console.log(`[CM:hook] 渠道 ${channel} session 更新: ${oldKey} → ${sessionKey}`);
+            const chCtx: SessionContext = { sessionKey, channel: effectiveChannel };
+            extraChannels.set(effectiveChannel, chCtx);
+            saveChannelCtx(effectiveChannel, chCtx);
+            console.log(`[CM:hook] channel ${effectiveChannel} session updated: ${oldKey} → ${sessionKey}`);
           }
         }
       }
