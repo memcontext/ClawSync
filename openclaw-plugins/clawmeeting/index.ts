@@ -9,7 +9,7 @@
 //   6. 去重三层：notifiedMeetings(磁盘) / submittedMeetings(内存) / pendingDecisions(磁盘)
 // ============================================================
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
@@ -456,9 +456,105 @@ export default function register(api: any) {
   // ============================================================
 
   /**
+   * 从 session transcript 文件中提取最近的 assistant 完整回复
+   * 用于 sessions_send 返回 error/timeout 后补捞 agent 的实际回复
+   */
+  /**
+   * 从 session transcript 中精确提取某个任务的 agent 回复。
+   *
+   * 不依赖 sessions_list（gateway restart 后返回的 transcript 路径可能过期），
+   * 直接扫描 sessions 目录中最近修改的 .jsonl 文件，用 [ClawMeeting {taskType}] + meeting_id 定位锚点，
+   * 沿锚点往后找属于该任务的最终 assistant 回复。
+   */
+  async function pollReplyFromTranscript(
+    sessionKey: string, meetingId: string, taskType: string, afterTs: number,
+    maxWaitMs: number = 40000, pollIntervalMs: number = 5000,
+  ): Promise<string | undefined> {
+    const sessionsDir = join(homedir(), ".openclaw", "agents", "main", "sessions");
+    const anchorMarker = `ClawMeeting ${taskType}`;
+
+    console.log(`[CM:poll-reply] 扫描 ${sessionsDir} meetingId=${meetingId?.slice(-8)} taskType=${taskType} (最长 ${maxWaitMs / 1000}s)`);
+    const startMs = Date.now();
+
+    while (Date.now() - startMs < maxWaitMs) {
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+
+      try {
+        // 1. 找最近修改的 .jsonl 文件（最多 3 个，按 mtime 倒序）
+        let files: { name: string; mtime: number }[];
+        try {
+          files = readdirSync(sessionsDir)
+            .filter(f => f.endsWith(".jsonl"))
+            .map(f => ({ name: f, mtime: statSync(join(sessionsDir, f)).mtimeMs }))
+            .sort((a, b) => b.mtime - a.mtime)
+            .slice(0, 3);
+        } catch {
+          console.warn(`[CM:poll-reply] 无法读取 sessions 目录`);
+          continue;
+        }
+
+        // 2. 在每个文件中搜索锚点 + 提取回复
+        for (const file of files) {
+          const filePath = join(sessionsDir, file.name);
+          const content = readFileSync(filePath, "utf-8");
+          const lines = content.trim().split("\n");
+
+          // 2a. 从后往前找锚点
+          let anchorIdx = -1;
+          for (let i = lines.length - 1; i >= Math.max(0, lines.length - 50); i--) {
+            try {
+              if (!lines[i].includes(anchorMarker) || !lines[i].includes(meetingId)) continue;
+              const entry = JSON.parse(lines[i]);
+              if (entry?.message?.role === "user") { anchorIdx = i; break; }
+            } catch {}
+          }
+
+          if (anchorIdx < 0) continue; // 此文件没有锚点，试下一个
+
+          // 2b. 从锚点往后找 assistant 回复（遇到下一个任务 break）
+          let lastReply: string | undefined;
+          for (let i = anchorIdx + 1; i < Math.min(anchorIdx + 30, lines.length); i++) {
+            try {
+              const entry = JSON.parse(lines[i]);
+              const msg = entry?.message;
+
+              // 任务边界：下一个 [ClawMeeting 或 [System 开头的 user 消息
+              if (msg?.role === "user") {
+                const txt = Array.isArray(msg.content) ? msg.content.map((c: any) => c.text ?? "").join("") : "";
+                if (txt.includes("[ClawMeeting") || txt.includes("[System")) break;
+              }
+
+              if (msg?.role === "assistant" && msg?.content) {
+                const texts = Array.isArray(msg.content)
+                  ? msg.content.filter((c: any) => c.type === "text" && c.text).map((c: any) => c.text)
+                  : [typeof msg.content === "string" ? msg.content : ""];
+                const combined = texts.join("\n").trim();
+                if (combined.length > 50) lastReply = combined;
+              }
+            } catch {}
+          }
+
+          if (lastReply) {
+            console.log(`[CM:poll-reply] 补捞成功 file=${file.name.slice(0, 8)} (${lastReply.length}字, ${Date.now() - startMs}ms)`);
+            return lastReply;
+          }
+          console.log(`[CM:poll-reply] file=${file.name.slice(0, 8)} 锚点已找到但链上无有效回复`);
+        }
+
+        console.log(`[CM:poll-reply] 轮询中 (${Math.round((Date.now() - startMs) / 1000)}s/${maxWaitMs / 1000}s) 已扫 ${files.length} 个文件`);
+      } catch (e) {
+        console.warn(`[CM:poll-reply] 扫描异常: ${(e as Error)?.message}`);
+      }
+    }
+
+    console.log(`[CM:poll-reply] 轮询超时 meetingId=${meetingId?.slice(-8)} taskType=${taskType}`);
+    return undefined;
+  }
+
+  /**
    * 通过 sessions_send 发送到指定 session，触发 agent turn
    */
-  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean; reply?: string; timedOut?: boolean }> {
+  async function sendViaSessionsSend(message: string, sessionKey?: string): Promise<{ ok: boolean; reply?: string; timedOut?: boolean; agentTriggered?: boolean }> {
     const sk = sessionKey ?? sessionCtx.sessionKey ?? "agent:main:main";
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000); // 60s：agent 可能调用 LLM 或等待用户输入
@@ -503,10 +599,19 @@ export default function register(api: any) {
           return { ok: false };
         }
 
+        // 检测 status:"error" — gateway WS 连接异常关闭，agent 可能仍在执行但 reply 未捕获
+        const isError = body.includes('"status":"error"') || body.includes('"status": "error"');
+        if (isError) {
+          let errorReason = "unknown";
+          try { errorReason = JSON.parse(body)?.result?.details?.error ?? "unknown"; } catch {}
+          console.error(`[CM:push] <<< sessions_send error → ${sk} (${elapsed}ms): ${errorReason.substring(0, 200)}`);
+          console.warn(`[CM:push] ⚠️ agent 已触发但 WS 断开，reply 无法捕获（可从 transcript 补捞）`);
+          return { ok: false, agentTriggered: true };
+        }
+
         // 提取 agent 完整回复
-        // sessions_send 返回的 reply 字段只是最后一段纯文本摘要，
-        // agent 的完整回复（含会议详情、格式化内容）可能在 messages 数组或 content 字段中。
         let reply: string | undefined;
+        let timedOut = false;
         try {
           const json = JSON.parse(body);
           const details = json?.result?.details;
@@ -547,25 +652,17 @@ export default function register(api: any) {
           }
 
           // 检测 gateway 端 agent.wait 超时
-          // 此时 agent 实际上可能还在处理中或已处理完，但 gateway 先返回了 timeout
-          const isTimeout = details?.status === "timeout";
-          if (isTimeout) {
+          timedOut = details?.status === "timeout";
+          if (timedOut) {
             console.warn(`[CM:push] ⚠️ sessions_send gateway 超时 (agent.wait 到期)，agent 可能已处理但 reply 未捕获`);
           }
 
-          // debug：打印完整 body 结构 key（上线后可移除）
+          // debug：打印完整 body 结构 key
           const detailKeys = details ? Object.keys(details).join(",") : "null";
-          console.log(`[CM:push] response details keys=[${detailKeys}]${isTimeout ? " [TIMEOUT]" : ""} body前500字=${body.substring(0, 500)}`);
+          console.log(`[CM:push] response details keys=[${detailKeys}]${timedOut ? " [TIMEOUT]" : ""} body前500字=${body.substring(0, 500)}`);
         } catch (_e) {
           console.warn(`[CM:push] response body 非 JSON: ${body.substring(0, 300)}`);
         }
-
-        // 检测是否超时（body 已解析过，再解析一次获取标志）
-        let timedOut = false;
-        try {
-          const j2 = JSON.parse(body);
-          timedOut = j2?.result?.details?.status === "timeout";
-        } catch {}
 
         console.log(`[CM:push] <<< sessions_send ${timedOut ? "超时(gateway)" : "成功"} → ${sk} (${elapsed}ms) reply=${reply ? `"${reply.substring(0, 150)}..."` : "无"}`);
         return { ok: true, reply, timedOut };
@@ -639,6 +736,27 @@ export default function register(api: any) {
     }
   }
 
+  /**
+   * 统一推送到所有额外渠道（Telegram/飞书/Discord 等）
+   * 所有渠道都失败时自动 fallback 到 pendingNotifications（webchat prependContext）
+   */
+  async function pushToExtraChannels(msg: string): Promise<boolean> {
+    if (!msg.trim() || extraChannels.size === 0) return false;
+    let anyOk = false;
+    for (const [chName, chCtx] of extraChannels) {
+      const target = parseChannelTarget(chCtx.sessionKey);
+      if (!target) continue;
+      const { ok } = await sendViaMessageTool(target.channel, target.target, msg);
+      if (ok) anyOk = true;
+      else console.warn(`[CM:push] ${chName} 渠道推送失败 (${target.channel}:${target.target})`);
+    }
+    if (!anyOk && extraChannels.size > 0) {
+      pendingNotifications.push(msg);
+      console.log(`[CM:push] 所有渠道推送失败 → 已加入 pendingNotifications (${msg.length}字)`);
+    }
+    return anyOk;
+  }
+
   // ============================================================
   // 6. 通知去重 + 提交去重
   // ============================================================
@@ -677,22 +795,24 @@ export default function register(api: any) {
     const msg = t.message ?? "";
     const taskType = t.task_type;
     const header = `[ClawMeeting ${taskType}]`;
+    // 所有类型都附带 meeting_id，用于 transcript 补捞时精确定位锚点
+    const idLine = t.meeting_id ? `Meeting ID: ${t.meeting_id}` : "";
 
     // 通用规则：用用户的语言回复，保留所有字段不省略
     const langRule = "Reply in the user's language (detect from conversation history). Do NOT omit any fields from the notification.";
 
     if (taskType === "MEETING_CONFIRMED") {
-      return [header, msg, "",
+      return [header, idLine, msg, "",
         `Instruction: Present this confirmation to the user. Include ALL details: meeting title, confirmed time, duration, organizer, participants, and meeting link (if present). Format it clearly. ${langRule}`,
-      ].join("\n");
+      ].filter(Boolean).join("\n");
     }
     if (taskType === "MEETING_OVER") {
-      return [header, msg, "",
+      return [header, idLine, msg, "",
         `Instruction: Inform the user this meeting has been cancelled. Include the meeting title, reason (if provided), and who cancelled. ${langRule}`,
-      ].join("\n");
+      ].filter(Boolean).join("\n");
     }
     if (taskType === "COUNTER_PROPOSAL") {
-      return [header, msg, "",
+      return [header, idLine, msg, "",
         [
           "Instruction: The coordinator has sent a compromise proposal. This REQUIRES the user's decision.",
           "1. Present ALL details: meeting title, proposed time slots, coordinator's reasoning.",
@@ -704,10 +824,10 @@ export default function register(api: any) {
           "   Do NOT just acknowledge verbally — always call the tool.",
           langRule,
         ].join(" "),
-      ].join("\n");
+      ].filter(Boolean).join("\n");
     }
     if (taskType === "MEETING_FAILED") {
-      return [header, msg, "",
+      return [header, idLine, msg, "",
         [
           "Instruction: Meeting negotiation has failed. This REQUIRES the user's decision.",
           "1. Present the failure reason and meeting details.",
@@ -723,7 +843,7 @@ export default function register(api: any) {
           "   '取消'/'算了'/'不开了'/'cancel' → response_type=REJECT. Never just acknowledge verbally — always call the tool.",
           langRule,
         ].join(" "),
-      ].join("\n");
+      ].filter(Boolean).join("\n");
     }
     if (taskType === "INITIAL_SUBMIT") {
       const lines = [header];
@@ -779,9 +899,9 @@ export default function register(api: any) {
       return lines.join("\n");
     }
     // 其他类型：通用转告
-    return [header, msg, "",
+    return [header, idLine, msg, "",
       `Instruction: Relay this notification to the user. Preserve all fields and details exactly. ${langRule}`,
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   }
 
   /** 给用户直接看的通知（不含 agent 指令，用于 message tool 直推到 Telegram 等渠道） */
@@ -791,21 +911,47 @@ export default function register(api: any) {
     const taskType = t.task_type;
 
     if (taskType === "MEETING_CONFIRMED") {
-      return [`✅ 会议确认：「${title}」`, msg].filter(Boolean).join("\n");
+      const parts = [`✅ 会议确认：「${title}」`];
+      if (t.final_time) parts.push(`⏰ 时间: ${t.final_time}`);
+      if (t.duration_minutes) parts.push(`⏱️ 时长: ${t.duration_minutes} 分钟`);
+      if (t.meeting_link) parts.push(`🔗 链接: ${t.meeting_link}`);
+      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
+      if (t._participants) parts.push(`👥 参与者: ${t._participants}`);
+      if (msg) parts.push("", msg);
+      return parts.join("\n");
     }
     if (taskType === "MEETING_OVER") {
-      return [`❌ 会议取消：「${title}」`, msg].filter(Boolean).join("\n");
+      const parts = [`❌ 会议取消：「${title}」`];
+      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
+      if (msg) parts.push("", msg);
+      return parts.join("\n");
     }
     if (taskType === "COUNTER_PROPOSAL") {
-      return [`🔄 会议协商：「${title}」需要你决策`, msg, "", "请在对话中回复你的决策（接受/提出新时段/拒绝）"].filter(Boolean).join("\n");
+      const parts = [`🔄 会议协商：「${title}」需要你决策`];
+      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
+      if (t.duration_minutes) parts.push(`⏱️ 时长: ${t.duration_minutes} 分钟`);
+      if (msg) parts.push("", msg);
+      parts.push("", "请在对话中回复你的决策（接受/提出新时段/拒绝）");
+      return parts.join("\n");
     }
     if (taskType === "MEETING_FAILED") {
-      return [`❌ 会议协商失败：「${title}」`, msg, "", "请在对话中回复你的决策（取消/调整参数重试）"].filter(Boolean).join("\n");
+      const parts = [`❌ 会议协商失败：「${title}」`];
+      if (t.initiator) parts.push(`👤 组织者: ${t.initiator}`);
+      if (msg) parts.push("", msg);
+      parts.push("", "请在对话中回复你的决策（取消/调整参数重试）");
+      return parts.join("\n");
     }
     if (taskType === "INITIAL_SUBMIT") {
-      return [`收到 ${title} 会议邀请 📅`, msg].filter(Boolean).join("\n");
+      const parts = [`📅 收到会议邀请：「${title}」`];
+      if (t.initiator) parts.push(`👤 发起人: ${t.initiator}`);
+      if (t.duration_minutes) parts.push(`⏱️ 时长: ${t.duration_minutes} 分钟`);
+      if (msg) parts.push("", msg);
+      return parts.join("\n");
     }
-    return [`📅 ${title}`, msg].filter(Boolean).join("\n");
+    const parts = [`📅 ${title}`];
+    if (t.initiator) parts.push(`👤 ${t.initiator}`);
+    if (msg) parts.push(msg);
+    return parts.join("\n");
   }
 
 
@@ -903,6 +1049,17 @@ export default function register(api: any) {
       if (taskQueue.some(q => q.task.meeting_id === meetingId && q.task.task_type === taskType)) { console.log(`[CM:collect]   → 跳过: 已在队列中`); continue; }
       notifiedMeetings.add(dedupKey);
 
+      // 拉取 meeting detail 补充关键字段（task 对象本身只有 title/message，缺少 final_time/duration/link）
+      try {
+        const detail = await apiClient.getMeetingDetail(meetingId);
+        if (detail.final_time) t.final_time = detail.final_time;
+        if (detail.duration_minutes) t.duration_minutes = detail.duration_minutes;
+        if ((detail as any).meeting_link) t.meeting_link = (detail as any).meeting_link;
+        if (detail.participants) {
+          t._participants = detail.participants.map((p: any) => p.email).join(", ");
+        }
+      } catch (_e) { /* ignore — directMsg 会少几个字段但不影响主流程 */ }
+
       taskQueue.push({
         task: t,
         retryCount: 0,
@@ -971,12 +1128,7 @@ export default function register(api: any) {
         // INITIAL_SUBMIT 不通知用户（静默处理），其他类型通知
         if (taskType !== "INITIAL_SUBMIT") {
           const offlineMsg = `⚠️ 会议「${title}」因 Agent 离线超时（10 分钟），已自动拒绝。如需参加请重新协商。`;
-          for (const [chName, chCtx] of extraChannels) {
-            const target = parseChannelTarget(chCtx.sessionKey);
-            if (target) {
-              await sendViaMessageTool(target.channel, target.target, offlineMsg);
-            }
-          }
+          await pushToExtraChannels(offlineMsg);
           pendingNotifications.push(offlineMsg);
         }
 
@@ -988,63 +1140,67 @@ export default function register(api: any) {
       // ---- 正常处理：sessions_send → 提取 reply → message tool 分发 ----
       console.log(`[CM:queue] 处理: ${taskType}(${meetingId?.slice(-8)}) 「${title}」 retry=${item.retryCount} age=${Math.round(ageMs / 1000)}s`);
 
-      const { ok: mainOk, reply, timedOut } = await sendViaSessionsSend(item.agentMsg);
+      const sendStartTs = Date.now(); // 用于 transcript 补捞的时间基线
+      const { ok: mainOk, reply, timedOut, agentTriggered } = await sendViaSessionsSend(item.agentMsg);
 
       if (!mainOk) {
         // ---- sessions_send 失败 ----
-        item.retryCount++;
-        if (item.retryCount >= MAX_RETRY) {
-          console.error(`[CM:queue] 超过最大重试次数(${MAX_RETRY})，fallback: ${taskType}(${meetingId?.slice(-8)})`);
-          taskQueue.shift();
-          if (taskType === "INITIAL_SUBMIT") {
-            console.log(`[CM:queue] INITIAL_SUBMIT 失败，不推送到用户渠道，等下次轮询重新入队`);
-            submittedMeetings.delete(meetingId);
-          } else {
-            // fallback：用构建好的 directMsg 判断（而非 API 原始 message，后者可能为空）
-            if (item.directMsg.trim()) {
-              pendingNotifications.push(item.directMsg);
-              for (const [chName, chCtx] of extraChannels) {
-                const target = parseChannelTarget(chCtx.sessionKey);
-                if (target) {
-                  await sendViaMessageTool(target.channel, target.target, item.directMsg);
-                }
-              }
-            } else {
-              console.log(`[CM:queue] directMsg 为空，跳过 fallback 推送`);
-            }
+
+        // 特殊处理：agent 已触发但 WS 断开 (status:"error")
+        // agent 可能仍在执行，不应盲目重试（会重复触发 agent turn）
+        // 尝试从 transcript 补捞 reply
+        if (agentTriggered) {
+          console.log(`[CM:queue] agent 已触发但连接断开，尝试从 transcript 补捞 reply...`);
+          taskQueue.shift(); // 移出队列，不重试（避免重复 agent turn）
+          const sk = sessionCtx.sessionKey ?? "agent:main:main";
+          const polledReply = await pollReplyFromTranscript(sk, meetingId, taskType, sendStartTs, 40000, 5000);
+          const channelMsg = polledReply ?? (item.directMsg.trim() ? item.directMsg : undefined);
+          const source = polledReply ? "transcript 补捞" : "directMsg (补捞失败)";
+          if (channelMsg) {
+            console.log(`[CM:queue] 推送到额外渠道 (${source}): ${channelMsg.length}字`);
+            await pushToExtraChannels(channelMsg);
           }
         } else {
-          console.log(`[CM:queue] sessions_send 失败，留在队列等下次重试 (retry=${item.retryCount}/${MAX_RETRY})`);
+          // 非 agent-triggered 的失败（forbidden/404/网络错误）→ 正常重试
+          item.retryCount++;
+          if (item.retryCount >= MAX_RETRY) {
+            console.error(`[CM:queue] 超过最大重试次数(${MAX_RETRY})，fallback: ${taskType}(${meetingId?.slice(-8)})`);
+            taskQueue.shift();
+            if (taskType === "INITIAL_SUBMIT") {
+              console.log(`[CM:queue] INITIAL_SUBMIT 失败，不推送到用户渠道，等下次轮询重新入队`);
+              submittedMeetings.delete(meetingId);
+            } else {
+              // fallback：用构建好的 directMsg 推送到渠道 + pendingNotifications
+              if (item.directMsg.trim()) {
+                await pushToExtraChannels(item.directMsg);
+                pendingNotifications.push(item.directMsg);
+              } else {
+                console.log(`[CM:queue] directMsg 为空，跳过 fallback 推送`);
+              }
+            }
+          } else {
+            console.log(`[CM:queue] sessions_send 失败，留在队列等下次重试 (retry=${item.retryCount}/${MAX_RETRY})`);
+          }
         }
       } else {
         // ---- sessions_send 成功，移出队列 ----
         taskQueue.shift();
         console.log(`[CM:queue] sessions_send 成功`);
 
-        // 所有类型（含 INITIAL_SUBMIT）都推送到额外渠道，让用户在 Telegram 等渠道也能看到处理结果
-        // 策略：优先推 agent reply（经过 prompt 格式化的结果），reply 为空则 fallback 到 directMsg
-        if (extraChannels.size > 0) {
-          // 确定推送内容：reply 优先，directMsg 兜底
-          let channelMsg: string | undefined;
-          let channelSource: string;
-          if (reply) {
-            channelMsg = reply;
-            channelSource = "agent reply";
-          } else if (item.directMsg.trim()) {
-            channelMsg = item.directMsg;
-            channelSource = timedOut ? "directMsg (gateway 超时, reply 未捕获)" : "directMsg (reply 为空)";
-          }
+        // 统一走 transcript 补捞拿完整 agent reply（sessions_send 的 reply 不可靠）
+        // directMsg 仅作为补捞失败时的兜底
+        {
+          console.log(`[CM:queue] 从 transcript 补捞完整 reply...`);
+          const sk = sessionCtx.sessionKey ?? "agent:main:main";
+          const polledReply = await pollReplyFromTranscript(sk, meetingId, taskType, sendStartTs, 40000, 5000);
+          const channelMsg = polledReply ?? (item.directMsg.trim() ? item.directMsg : undefined);
+          const channelSource = polledReply ? "transcript 补捞" : "directMsg (补捞失败)";
 
           if (channelMsg) {
-            for (const [chName, chCtx] of extraChannels) {
-              const target = parseChannelTarget(chCtx.sessionKey);
-              if (target) {
-                console.log(`[CM:queue] ${chName} 推送 (${channelSource}): ${target.channel}:${target.target} (${channelMsg.length}字)`);
-                await sendViaMessageTool(target.channel, target.target, channelMsg);
-              }
-            }
+            console.log(`[CM:queue] 推送到额外渠道 (${channelSource}): ${channelMsg.length}字`);
+            await pushToExtraChannels(channelMsg);
           } else {
-            console.log(`[CM:queue] reply 和 directMsg 均为空，跳过额外渠道推送`);
+            console.log(`[CM:queue] 补捞失败且 directMsg 为空，跳过推送`);
           }
         }
       }
