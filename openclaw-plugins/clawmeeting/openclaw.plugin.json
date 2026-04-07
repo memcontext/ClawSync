@@ -1,32 +1,36 @@
 {
   "id": "clawmeeting",
   "name": "ClawMeeting - AI Meeting Negotiator",
-  "version": "1.0.67",
-  "description": "智能会议协商插件。提供 5 个工具：bind_identity（邮箱绑定）、verify_email_code（验证码校验）、initiate_meeting（发起会议）、check_and_respond_tasks（查询待办/提交决策）、list_meetings（查看会议）。所有会议操作必须通过这些工具完成，禁止直接调用外部 API。",
+  "version": "1.0.74",
+  "description": "Intelligent meeting negotiation plugin. Provides 5 tools: bind_identity, verify_email_code, initiate_meeting, check_and_respond_tasks, list_meetings. All meeting operations must go through these tools — never call external APIs directly.",
   "skills": ["./skills"],
+  "compat": {
+    "pluginApi": ">=2026.4.0",
+    "builtWith": "2026.4.1"
+  },
   "configSchema": {
     "type": "object",
     "properties": {
       "serverUrl": {
         "type": "string",
-        "description": "中央协调端 API Server 地址",
+        "description": "Coordination server API URL",
         "default": "https://memcontext.ai/clawmeeting_api"
       },
       "pollingIntervalMs": {
         "type": "number",
-        "description": "轮询待办任务的间隔（毫秒）",
+        "description": "Polling interval for pending tasks (milliseconds)",
         "default": 10000
       },
       "autoRespond": {
         "type": "boolean",
-        "description": "是否自动响应 INITIAL_SUBMIT 类型任务",
+        "description": "Automatically respond to INITIAL_SUBMIT tasks",
         "default": true
       }
     }
   },
   "uiHints": {
-    "serverUrl": { "label": "服务端地址", "placeholder": "https://memcontext.ai/clawmeeting_api" },
-    "pollingIntervalMs": { "label": "轮询间隔 (ms)", "placeholder": "10000" },
-    "autoRespond": { "label": "自动响应会议邀请" }
+    "serverUrl": { "label": "Server URL", "placeholder": "https://memcontext.ai/clawmeeting_api" },
+    "pollingIntervalMs": { "label": "Polling interval (ms)", "placeholder": "10000" },
+    "autoRespond": { "label": "Auto-respond to meeting invitations" }
   }
 }

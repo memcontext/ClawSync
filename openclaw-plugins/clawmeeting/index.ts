@@ -10,7 +10,7 @@
 // ============================================================
 
 import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync, openSync, readSync, closeSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 
@@ -85,7 +85,24 @@ function readPluginId(): string {
 
 const PLUGIN_ID_FOR_ALLOW = "clawmeeting";
 const REQUIRED_GATEWAY_TOOLS = ["sessions_send", "message"];
-const RESTART_WELCOME_FLAG = join(homedir(), ".openclaw", "clawmeeting-restart-welcome.flag");
+
+// ---- 跨实例基础目录推导 ----
+// 从插件安装路径推导实例 stateDir：
+//   npm/ClawHub 安装: ~/.qclaw/extensions/clawmeeting/ → 上两级 = ~/.qclaw/
+//   本地开发 (plugins.load.paths): D:\...\clawmeeting\ → fallback 到环境变量或默认值
+function resolveBaseDir(): string {
+  const parentName = basename(dirname(__dirname_esm));
+  if (parentName === "extensions") {
+    return dirname(dirname(__dirname_esm));
+  }
+  if (process.env.OPENCLAW_DATA_DIR) return process.env.OPENCLAW_DATA_DIR;
+  return join(homedir(), ".openclaw");
+}
+
+const BASE_DIR = resolveBaseDir();
+console.log(`[CM:init] BASE_DIR=${BASE_DIR} (from __dirname=${__dirname_esm})`);
+
+const RESTART_WELCOME_FLAG = join(BASE_DIR, "clawmeeting-restart-welcome.flag");
 
 
 // 插件工具名 — 这些通过 api.registerTool() 注册，由框架自动暴露给 LLM，
@@ -112,7 +129,7 @@ const PLUGIN_TOOL_NAMES = [
  */
 function ensureAllConfig(): void {
   try {
-    const configPath = join(homedir(), ".openclaw", "openclaw.json");
+    const configPath = join(BASE_DIR, "openclaw.json");
     if (!existsSync(configPath)) {
       console.log("[CM:config] openclaw.json 不存在，跳过自动配置");
       return;
@@ -349,6 +366,7 @@ export default function register(api: any) {
   const PKG_VERSION = JSON.parse(readFileSync(join(__dirname_esm, "package.json"), "utf-8")).version;
   console.log(`\n🐾🐾🐾 [ClawMeeting] v${PKG_VERSION} loaded 🐾🐾🐾\n`);
 
+
   // 双保险：如果模块顶层执行时 openclaw.json 还没就绪
   ensureAllConfig();
 
@@ -364,7 +382,7 @@ export default function register(api: any) {
   console.log(`[CM:init] 插件配置: serverUrl=${pluginConfig.serverUrl}, pollingInterval=${pluginConfig.pollingIntervalMs}ms, autoRespond=${pluginConfig.autoRespond}`);
 
   // 初始化存储目录
-  initStorage(PLUGIN_ID);
+  initStorage(PLUGIN_ID, BASE_DIR);
 
   // ============================================================
   // 2. 初始化 API Client + 恢复 Token
@@ -418,7 +436,7 @@ export default function register(api: any) {
 
     // ---- Level 1: allowFrom store (Telegram-style pairing) ----
     try {
-      const allowStorePath = join(homedir(), ".openclaw", "credentials", `${channelName}-default-allowFrom.json`);
+      const allowStorePath = join(BASE_DIR, "credentials", `${channelName}-default-allowFrom.json`);
       if (existsSync(allowStorePath)) {
         const storeData = JSON.parse(readFileSync(allowStorePath, "utf-8"));
         const allowFrom: string[] = storeData?.allowFrom ?? [];
@@ -441,7 +459,7 @@ export default function register(api: any) {
     // records session operations (reset/send/etc.) with full sessionKey
     if (!extraChannels.has(channelName)) {
       try {
-        const cmdLogPath = join(homedir(), ".openclaw", "logs", "commands.log");
+        const cmdLogPath = join(BASE_DIR, "logs", "commands.log");
         if (existsSync(cmdLogPath)) {
           const logContent = readFileSync(cmdLogPath, "utf-8");
           const keyRe = new RegExp(
@@ -467,7 +485,7 @@ export default function register(api: any) {
     // Reads only the first 8KB of each file (sessionKey appears early in transcript metadata).
     if (!extraChannels.has(channelName)) {
       try {
-        const sessionsDir = join(homedir(), ".openclaw", "agents", "main", "sessions");
+        const sessionsDir = join(BASE_DIR, "agents", "main", "sessions");
         if (existsSync(sessionsDir)) {
           const files = readdirSync(sessionsDir)
             .filter(f => f.endsWith(".jsonl") && !f.includes(".reset.") && !f.includes(".deleted.") && !f.includes(".bak."))
@@ -543,7 +561,7 @@ export default function register(api: any) {
     sessionKey: string, meetingId: string, taskType: string, afterTs: number,
     maxWaitMs: number = 40000, pollIntervalMs: number = 5000,
   ): Promise<string | undefined> {
-    const sessionsDir = join(homedir(), ".openclaw", "agents", "main", "sessions");
+    const sessionsDir = join(BASE_DIR, "agents", "main", "sessions");
     const anchorMarker = `ClawMeeting ${taskType}`;
 
     console.log(`[CM:poll-reply] 扫描 ${sessionsDir} meetingId=${meetingId?.slice(-8)} taskType=${taskType} (最长 ${maxWaitMs / 1000}s)`);

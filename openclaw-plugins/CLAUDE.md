@@ -46,7 +46,15 @@ openclaw-plugins/
 
 ## 当前阶段
 
-**MVP 阶段** — 核心协商流程已通，邮箱验证码绑定已完成，正在解决通知投递 UX 问题。mock-calendar 仍为模拟数据，未接入真实日历。
+**v1.0.73** — 核心协商流程已通，全英文本地化完成，三级渠道自动发现已实现。mock-calendar 仍为模拟数据，未接入真实日历。
+
+## 工作流程原则（必须遵守）
+
+1. **先方案后实现**：修改代码前，先给出方案并获得用户确认
+2. **先测试后落地**：方案确认后，先给出测试计划并获得用户允许，验证通过后才改动代码。这才是完整的工程设计流程
+3. **快速执行**：确认后不要反复解释，直接做
+4. **不加署名**：Git 提交不加 Co-Authored-By
+5. **语言规范**：与用户中文交流；所有面向用户/agent/服务端的代码和文档内容必须英文；console.log 调试日志可保留中文
 
 ## 编程原则（必须遵守）
 
@@ -172,10 +180,13 @@ api.registerCli?.((cliCtx: { program: any }) => {
 - webchat/main sessionKey 返回 null（不支持 message tool）
 - message tool 参数: `{ tool: "message", args: { action: "send", channel, target, message } }`
 
-### 多渠道自动发现
-- **启动时**：遍历 `api.config.channels`，找 `enabled: true` 的渠道，读 `~/.openclaw/credentials/{channel}-default-allowFrom.json` 自动发现推送目标
-- **运行时**：`before_prompt_build` 捕获所有非 webchat 渠道的 session，持续更新
+### 多渠道自动发现（三级）
+- **Level 1 — allowFrom store**：遍历 `api.config.channels`，找 `enabled: true` 的渠道，读 `~/.openclaw/credentials/{channel}-default-allowFrom.json`（Telegram pairing 模式产生）
+- **Level 2 — commands.log 扫描**：扫 `~/.openclaw/logs/commands.log`，正则匹配 `"sessionKey":"agent:main:{channel}:..."` 提取渠道 session
+- **Level 3 — session transcript 扫描**：扫 `~/.openclaw/agents/main/sessions/` 下最近 10 个 `.jsonl` 文件，每个读前 8KB，提取 sessionKey（通用兜底，适用于 dmPolicy:"open" 的渠道如飞书）
+- **运行时**：`before_prompt_build` 使用 `effectiveChannel`（从 `sessionKey.split(":")[2]` 解析，因为飞书等渠道不传 `channelId`）捕获所有非 webchat 渠道的 session，持续更新
 - **存储**：每个渠道独立持久化到 `channel-{name}.json`，重启后恢复
+- **覆写策略**：`extraChannels` Map 每个渠道名只保留一个 entry，新 session 覆写旧 session
 
 ### Session 管理
 - 在 `before_prompt_build` 中捕获主 session（排除 cron/run/subagent 临时 session）
@@ -250,13 +261,21 @@ COLLECTING → ANALYZING → CONFIRMED
 14. **reply 提取增强** — 优先从 messages 数组提取完整 assistant 回复，兜底 content → reply
 15. **移除不支持的 submit 参数** — 去掉 duration_minutes 和 invitees（服务端 submit 接口不支持）
 16. **GUIDE.md 合并到 SKILL.md** — 去掉重复文档，统一为一个 agent skill 文件
+17. **全英文本地化 (v1.0.73)** — 所有用户/agent/服务端交互字符串改为英文，包括 buildDirectNotification、buildAgentNotification、CLI 状态输出、offlineMsg、preference_note。仅 console.log 调试日志保留中文
+18. **三级渠道自动发现 (v1.0.73)** — Level 1 allowFrom.json + Level 2 commands.log + Level 3 session transcript .jsonl 扫描，解决飞书等 dmPolicy:"open" 渠道无 allowFrom.json 的发现问题
+19. **effectiveChannel 修复 (v1.0.73)** — `before_prompt_build` 改用 `sessionKey.split(":")[2]` 解析渠道名，解决飞书不传 channelId 导致 session 无法捕获的问题
+20. **pollReplyFromTranscript (v1.0.73)** — sessions_send 成功后从 `~/.openclaw/agents/main/sessions/` 的 .jsonl 文件补捞完整 agent reply，作为主方法替代不可靠的 sessions_send response。扫描最近 3 个文件，用 `[ClawMeeting {taskType}]` + meetingId 定位锚点
+21. **README.md 英文化** — 删除中文重复段落，保留英文
+22. **SKILL.md 英文化** — agent 引导提示词全部改为英文
+23. **docs 英文化** — plugin-email-bind-changes.md 全部改为英文
+24. **openclaw.plugin.json 更新** — 版本 1.0.73，所有描述/uiHints 英文化，兼容性更新为 pluginApi>=2026.4.0 / builtWith=2026.4.1
+25. **overlap check util** — `output_summary.py` 新增 `_compute_overlap_minutes` 和 `_check_overlap_with_initiator`，检测参与者与发起人时间重叠是否满足会议时长
 
 ### 待优化
 
 - webchat 推送 UX（sessions_send 的系统消息气泡仍可见，等 OpenClaw 开放 `chat.inject` 给插件）
-- 飞书渠道首次需用户发消息触发捕获（无 allowFrom.json），之后重启自动恢复
-- npm 发布新版（当前 npm 为 1.0.18，本地代码已超前）
-- 协调端增加重叠时间不足检测（参与者与发起人时间重叠 < 会议时长 → FAILED）
+- npm 发布新版（当前 npm 为 1.0.18，本地代码已超前至 1.0.73）
+- **pollReplyFromTranscript 跨平台兼容**：Mac 上 `sessions_send(role:"system")` 可能原样写入 transcript 为 `role:"system"`，而当前锚点匹配只检查 `role:"user"`（第581行），需放宽为 `role in ("user","system")`。已给出诊断方案，待同事 Mac 上验证后修复
 
 ---
 

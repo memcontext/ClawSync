@@ -8,15 +8,16 @@ import { join } from "path";
 import { homedir } from "os";
 import type { StoredCredentials, UserPreferences, SessionContext } from "../types/index.js";
 
-// 存储路径（由 initStorage 初始化，基于插件 ID 动态生成）
-let STORAGE_DIR = join(homedir(), ".openclaw", "clawmeeting");
-let CREDENTIALS_FILE = join(STORAGE_DIR, "credentials.json");
-let PREFERENCES_FILE = join(STORAGE_DIR, "preferences.json");
-let SESSION_FILE = join(STORAGE_DIR, "session.json");
+// 存储路径（由 initStorage 初始化，延迟到插件加载时设置）
+let STORAGE_DIR = "";
+let CREDENTIALS_FILE = "";
+let PREFERENCES_FILE = "";
+let SESSION_FILE = "";
 
-/** 初始化存储路径（插件加载时调用，传入插件 ID） */
-export function initStorage(pluginId: string) {
-  STORAGE_DIR = join(homedir(), ".openclaw", pluginId);
+/** 初始化存储路径（插件加载时调用，传入插件 ID 和实例基础目录） */
+export function initStorage(pluginId: string, baseDir?: string) {
+  const root = baseDir ?? join(homedir(), ".openclaw");
+  STORAGE_DIR = join(root, pluginId);
   CREDENTIALS_FILE = join(STORAGE_DIR, "credentials.json");
   PREFERENCES_FILE = join(STORAGE_DIR, "preferences.json");
   SESSION_FILE = join(STORAGE_DIR, "session.json");
